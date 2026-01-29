@@ -48,11 +48,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
-          cpus: '0.8'
+          memory: 512M
+          cpus: '0.6'
         reservations:
-          memory: 256M
-          cpus: '0.2'
+          memory: 128M
+          cpus: '0.1'
 
   # PostgreSQL Database with pgvector (AI Server용)
   db-ai:
@@ -87,11 +87,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '0.5'
+          memory: 256M
+          cpus: '0.3'
         reservations:
-          memory: 128M
-          cpus: '0.1'
+          memory: 64M
+          cpus: '0.05'
 
 networks:
   ggud-network:
