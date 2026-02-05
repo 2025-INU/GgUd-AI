@@ -25,10 +25,17 @@ def recommend_places_for_spring(
     # 디버깅: 추출된 카테고리 출력
     print(f"[DEBUG] 추출된 카테고리: companion={categories.companion}, menu={categories.menu}, mood={categories.mood}, purpose={categories.purpose}", file=sys.stderr)
     
-    # 위치 필터링 (있는 경우만)
-    # 위치 정보가 없으면 Spring에서 중간지점 계산하도록 None 전달
+    # 위치 필터링 (우선순위: 요청의 위도/경도 > 쿼리에서 추출한 위치)
     location_filter = None
-    if location:
+    if payload.latitude is not None and payload.longitude is not None:
+        # 요청에 명시적으로 위도/경도가 있으면 우선 사용
+        location_filter = {
+            "latitude": payload.latitude,
+            "longitude": payload.longitude,
+            "radius_km": 10.0,  # 기본 10km 반경
+        }
+    elif location:
+        # 쿼리에서 위치를 추출한 경우 사용
         location_filter = {
             "latitude": location["latitude"],
             "longitude": location["longitude"],

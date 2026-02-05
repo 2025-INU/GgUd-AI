@@ -27,7 +27,9 @@ class PlaceRecommendRequest(BaseModel):
     """Spring Boot 호출 형식 요청"""
     query: str = Field(..., description="사용자 자연어 요청")
     promise_id: Optional[int] = Field(None, description="약속 ID")
-    limit: Optional[int] = Field(5, ge=1, le=20, description="추천 개수 (기본 5개)")
+    limit: Optional[int] = Field(10, ge=1, le=20, description="추천 개수 (기본 10개)")
+    latitude: Optional[float] = Field(None, description="중간지점 위도")
+    longitude: Optional[float] = Field(None, description="중간지점 경도")
 
 
 class PlaceRecommendationItem(BaseModel):
