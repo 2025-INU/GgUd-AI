@@ -121,8 +121,8 @@ def recommend_places(
     categories: CategoryInfo,
     limit: int | None = None,
     location_filter: dict[str, float] | None = None,  # {"latitude": float, "longitude": float, "radius_km": float}
-) -> tuple[list[PlaceOut], CategoryInfo]:
-    """Return recommended places based on category embeddings with weighted scoring."""
+) -> tuple[list[PlaceOut], CategoryInfo, dict[int, float]]:
+    """Return recommended places and per-place weighted scores (place_id -> score)."""
     limit = limit or settings.recommendation_top_k
     
     # 각 카테고리별로 유사 장소 찾기 (가중치 적용)
@@ -151,7 +151,7 @@ def recommend_places(
             place_scores[place_id] += weighted_score
     
     if not place_scores:
-        return [], categories
+        return [], categories, {}
     
     # 지역 필터링 적용 (있는 경우)
     if location_filter:
@@ -181,20 +181,23 @@ def recommend_places(
             if distance_km <= radius_km:
                 filtered_scores[place.id] = place_scores[place.id]
         
-        place_scores = filtered_scores
+        # 반경 안에 후보가 있으면 필터 결과 사용, 없으면 위치 필터 무시하고 전체 사용
+        if filtered_scores:
+            place_scores = filtered_scores
     
     # 점수 순으로 정렬하여 상위 limit개 선택
     sorted_place_ids = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)[:limit]
-    
+
     if not sorted_place_ids:
-        return [], categories
-    
+        return [], categories, {}
+
     top_place_ids = [place_id for place_id, _score in sorted_place_ids]
-    
+    top_scores = {pid: score for pid, score in sorted_place_ids}
+
     places: Iterable[Place] = (
         db.execute(select(Place).where(Place.id.in_(top_place_ids))).scalars().all()
     )
     ordered_places = sorted(places, key=lambda p: top_place_ids.index(p.id))
-    return [PlaceOut.model_validate(p) for p in ordered_places], categories
+    return [PlaceOut.model_validate(p) for p in ordered_places], categories, top_scores
 
 

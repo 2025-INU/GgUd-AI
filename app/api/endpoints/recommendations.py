@@ -30,7 +30,7 @@ def recommend(payload: RecommendationRequest, db: Session = Depends(get_db)) -> 
             "radius_km": 10.0,  # 기본 10km 반경
         }
     
-    items, extracted = recommend_places(db, categories, payload.limit, location_filter)
+    items, extracted, _ = recommend_places(db, categories, payload.limit, location_filter)
     return RecommendationResponse(
         items=items,
         meta=RecommendationDebug(extracted_categories=extracted),

@@ -6,7 +6,10 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.schemas.recommendation import PlaceRecommendRequest, PlaceRecommendResponse, PlaceRecommendationItem
 from app.services.llm import llm_service
-from app.services.recommendation import recommend_places
+from app.services.recommendation import CATEGORY_WEIGHTS, recommend_places
+
+# 만점 = 100점 절대점수용 (가중치 합 최댓값)
+MAX_RAW_SCORE = sum(CATEGORY_WEIGHTS.values())
 
 router = APIRouter(tags=["spring-integration"])
 
@@ -42,15 +45,15 @@ def recommend_places_for_spring(
             "radius_km": 10.0,  # 기본 10km 반경
         }
     
-    items, extracted = recommend_places(db, categories, payload.limit, location_filter)
-    
+    items, extracted, place_scores = recommend_places(db, categories, payload.limit, location_filter)
+
+    # 절대점수: 만점 100점, raw를 MAX_RAW_SCORE 기준으로 환산 후 소수 둘째자리
+    def to_absolute_score(raw: float) -> float:
+        return round((raw / MAX_RAW_SCORE) * 100.0, 2) if MAX_RAW_SCORE > 0 else 0.0
+
     # Spring Boot 형식으로 변환
     recommendations = []
     for item in items:
-        # AI 점수 계산 (간단히 0~100 범위로 정규화)
-        # 실제로는 추천 점수를 사용하거나 별도 계산 필요
-        ai_score = 85.0  # 임시값, 나중에 실제 점수 계산 로직 추가 가능
-        
         recommendations.append(
             PlaceRecommendationItem(
                 place_id=str(item.id),
@@ -59,7 +62,7 @@ def recommend_places_for_spring(
                 address=item.origin_address,
                 latitude=item.latitude,
                 longitude=item.longitude,
-                ai_score=ai_score,
+                ai_score=to_absolute_score(place_scores.get(item.id, 0.0)),
                 distance_from_midpoint=None,  # Spring에서 계산하도록 None
             )
         )
