@@ -58,7 +58,7 @@ except ImportError:
     S3_AVAILABLE = False
 
 # 타임아웃 상수 (ms)
-TIMEOUT = 10000
+TIMEOUT = 20000
 
 
 class NaverMapPlaceCrawler:
