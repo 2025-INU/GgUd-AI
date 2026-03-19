@@ -58,6 +58,8 @@ services:
   db-ai:
     image: ankane/pgvector:v0.5.1
     container_name: ggud-postgres-ai
+    ports:
+      - "5433:5432"
     environment:
       - POSTGRES_USER=${DB_USERNAME}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
