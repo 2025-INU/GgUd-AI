@@ -34,6 +34,15 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKER_USERNAME }}/ggud-ai:latest
 
+      - name: Sync docker-compose file to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "docker-compose.yml"
+          target: "/opt/ggud/GgUd-AI/"
+
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -42,7 +51,6 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /opt/ggud/GgUd-AI
-            git pull origin main
             docker-compose pull
             docker-compose --env-file .env up -d --force-recreate
             docker system prune -af
