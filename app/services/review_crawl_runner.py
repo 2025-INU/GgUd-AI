@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
 from app.models.place import Place
+from app.models.review import Review
 from app.schemas.crawl import ReviewCrawlSummary
 from app.services.recommendation import refresh_embeddings
 
@@ -18,6 +20,36 @@ from app.services.recommendation import refresh_embeddings
 BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 REVIEW_SCRIPT = BACKEND_ROOT / "scripts" / "review_crawl.py"
 PYTHON_BIN = sys.executable
+
+
+def _upsert_review(db: Session, place_id: int, review_data: dict) -> Review | None:
+    """리뷰를 DB에 저장/업데이트 후 반환 (임베딩 시 review.id 사용)."""
+    rid = review_data.get("id") or review_data.get("review_id")
+    if not rid:
+        return None
+    rid = str(rid)
+    existing = db.query(Review).filter(Review.review_id == rid).first()
+    content = (review_data.get("content") or "").strip()
+    if existing:
+        existing.content = content
+        existing.author = review_data.get("author")
+        existing.rating = review_data.get("rating")
+        existing.crawled_at = datetime.now()
+        db.commit()
+        db.refresh(existing)
+        return existing
+    review = Review(
+        place_id=place_id,
+        review_id=rid,
+        author=review_data.get("author"),
+        content=content,
+        rating=review_data.get("rating"),
+        crawled_at=datetime.now(),
+    )
+    db.add(review)
+    db.commit()
+    db.refresh(review)
+    return review
 
 
 def _run_command(args: list[str]) -> str:
@@ -78,12 +110,15 @@ def crawl_reviews_for_places(
         print(f"[INFO] place_id={place_id}: {len(reviews)}개 리뷰 처리 시작", file=sys.stderr)
 
         reviews_processed = 0
-        for review in reviews:
-            content = (review.get("content") or "").strip()
+        for review_data in reviews:
+            content = (review_data.get("content") or "").strip()
             if not content:
                 continue
+            review_row = _upsert_review(db, place_id, review_data)
+            if not review_row:
+                continue
             reviews_processed += 1
-            _, inserted = refresh_embeddings(db, place_id, content)
+            _, inserted = refresh_embeddings(db, place_id, review_row.id, content)
             embeddings_created += inserted
         
         print(f"[INFO] place_id={place_id}: {reviews_processed}개 리뷰 처리 완료, {embeddings_created}개 임베딩 생성", file=sys.stderr)

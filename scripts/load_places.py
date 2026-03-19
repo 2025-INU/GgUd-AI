@@ -67,17 +67,17 @@ def load_places(jsonl_path: Path, db: Session) -> tuple[int, int, int]:
         # 필수 필드 확인
         name = record.get("name")
         category = record.get("category") or "기타"
-        origin_address = record.get("origin_address") or record.get("address")
+        road_address = record.get("road_address") or record.get("address")
         latitude = record.get("latitude")
         longitude = record.get("longitude")
 
-        if not all([name, origin_address, latitude is not None, longitude is not None]):
+        if not all([name, road_address, latitude is not None, longitude is not None]):
             skipped += 1
             missing_fields = []
             if not name:
                 missing_fields.append("name")
-            if not origin_address:
-                missing_fields.append("origin_address")
+            if not road_address:
+                missing_fields.append("road_address")
             if latitude is None:
                 missing_fields.append("latitude")
             if longitude is None:
@@ -91,10 +91,12 @@ def load_places(jsonl_path: Path, db: Session) -> tuple[int, int, int]:
                 "id": place_id,
                 "name": name,
                 "category": category,
-                "origin_address": origin_address,
+                "road_address": road_address,
                 "latitude": float(latitude),
                 "longitude": float(longitude),
                 "crawled_at": datetime.now(),
+                "review_count": record.get("review_count") if record.get("review_count") is not None else 0,
+                "updated_at": datetime.now(),
             }
             upsert_place(db, payload)
             success += 1

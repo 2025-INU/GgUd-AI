@@ -47,7 +47,7 @@ def generate_embeddings_for_place(db: Session, place_id: int) -> tuple[int, int]
             continue
 
         try:
-            _, inserted = refresh_embeddings(db, place_id, content)
+            _, inserted = refresh_embeddings(db, place_id, review.id, content)
             total_inserted += inserted
             processed += 1
         except Exception as exc:

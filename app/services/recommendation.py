@@ -19,28 +19,72 @@ CATEGORY_KEYS = ("companion", "menu", "mood", "purpose")
 
 # 카테고리별 가중치 (고정값)
 CATEGORY_WEIGHTS = {
-    "companion": 1.0,  # 동행자 (가장 중요)
-    "menu": 0.8,       # 메뉴
-    "mood": 0.6,       # 분위기
-    "purpose": 0.4,    # 목적
+    "menu": 0.4,       # 메뉴
+    "companion": 0.2,  # 동행자
+    "mood": 0.2,       # 분위기
+    "purpose": 0.2,    # 목적
 }
+
+# ai_score 0~100 환산용 (가중치 합 = 1.0이면 만점 1.0)
+MAX_RAW_SCORE = sum(CATEGORY_WEIGHTS.values())
+
+# 메뉴가 구체적으로 지정됐을 때, 이 거리(코사인 거리) 이내인 리뷰 메뉴 임베딩이 있는 장소만 후보로 둠.
+# (거리 0 = 동일, 2 = 반대. 0.45 이하면 유사도 약 0.775 이상으로 실제 그 메뉴를 다루는 장소로 간주)
+MENU_MATCH_DISTANCE_THRESHOLD = 0.45
+# 메뉴 지정 시, 이 가중 점수(menu 기여분) 미만인 장소는 최종 추천에서 제외
+MENU_MIN_WEIGHTED_SCORE = 0.28
+
+
+def _similar_places_stmt(
+    category: str,
+    query_vector: list[float],
+    limit: int,
+    candidate_place_ids: list[int] | None = None,
+) -> Select:
+    """리뷰(행) 단위로 쿼리와의 코사인 거리를 구한 뒤, 장소별로 그 거리의 평균으로 유사도 계산.
+    중복/빈도 보정 없음: 각 리뷰에 대해 유사도 검색 → 장소별 평균으로 랭킹."""
+    distance = PlaceEmbedding.embedding.cosine_distance(query_vector)
+    stmt = (
+        select(
+            PlaceEmbedding.place_id,
+            func.avg(distance).label("avg_distance"),
+        )
+        .where(PlaceEmbedding.category == category)
+    )
+    if candidate_place_ids:
+        stmt = stmt.where(PlaceEmbedding.place_id.in_(candidate_place_ids))
+    return (
+        stmt.group_by(PlaceEmbedding.place_id)
+        .order_by("avg_distance")
+        .limit(limit * 5)
+    )
 
 
 def upsert_place(db: Session, data: dict) -> Place:
     """Insert or update place metadata."""
     from datetime import datetime
-    
+
+    allowed = ("name", "category", "road_address", "latitude", "longitude", "review_count", "crawled_at", "updated_at")
+    now = datetime.now()
     try:
         place = db.get(Place, data["id"])
         if place:
-            for field in ("name", "category", "origin_address", "latitude", "longitude"):
-                setattr(place, field, data[field])
-            place.updated_at = datetime.now()
+            for field in allowed:
+                if field in data:
+                    setattr(place, field, data[field])
+            place.updated_at = data.get("updated_at") or now
         else:
-            # 새로 생성할 때 crawled_at 설정
-            if "crawled_at" not in data:
-                data["crawled_at"] = datetime.now()
-            place = Place(**data)
+            payload = {"id": data["id"]}
+            for field in allowed:
+                if field in data:
+                    payload[field] = data[field]
+            if "crawled_at" not in payload:
+                payload["crawled_at"] = now
+            if "updated_at" not in payload:
+                payload["updated_at"] = now
+            if "review_count" not in payload:
+                payload["review_count"] = 0
+            place = Place(**payload)
             db.add(place)
         db.commit()
         db.refresh(place)
@@ -50,154 +94,182 @@ def upsert_place(db: Session, data: dict) -> Place:
         raise
 
 
-def refresh_embeddings(db: Session, place_id: int, content: str) -> tuple[CategoryInfo, int]:
-    """Extract categories from review text and store embeddings."""
+def refresh_embeddings(db: Session, place_id: int, review_id: int, content: str) -> tuple[CategoryInfo, int]:
+    """Extract categories from review text and store embeddings (리뷰별 각각 저장)."""
     import sys
     
     def split_values(value: str | None) -> list[str]:
-        """쉼표로 구분된 값을 분리하여 리스트로 반환"""
         if not value:
             return []
-        # 쉼표로 분리하고 각 값을 trim
         return [v.strip() for v in str(value).split(",") if v.strip()]
     
     categories = llm_service.extract_categories(content)
     inserted = 0
-    skipped = 0
     
     for key in CATEGORY_KEYS:
         value = getattr(categories, key)
         if not value:
             continue
-        
-        # 쉼표로 구분된 값들을 분리
         values = split_values(value)
-        
-        # 각 값을 개별적으로 임베딩 생성 및 저장
         for single_value in values:
             exists = (
                 db.query(PlaceEmbedding)
                 .filter(
                     PlaceEmbedding.place_id == place_id,
+                    PlaceEmbedding.review_id == review_id,
                     PlaceEmbedding.category == key,
                     PlaceEmbedding.value_text == single_value,
                 )
                 .first()
             )
             if exists:
-                skipped += 1
-                print(f"[DEBUG] place_id={place_id}, {key}=\"{single_value}\" → 중복 스킵", file=sys.stderr)
                 continue
-            
             embedding = llm_service.embed_text(single_value)
             embedding_row = PlaceEmbedding(
                 place_id=place_id,
+                review_id=review_id,
                 category=key,
                 value_text=single_value,
                 embedding=embedding,
             )
             db.add(embedding_row)
             inserted += 1
-            print(f"[DEBUG] place_id={place_id}, {key}=\"{single_value}\" → 임베딩 생성", file=sys.stderr)
-    
+            print(f"[DEBUG] place_id={place_id}, review_id={review_id}, {key}=\"{single_value}\" → 임베딩 생성", file=sys.stderr)
     db.commit()
     return categories, inserted
-
-
-def _similar_places_stmt(category: str, query_vector: list[float], limit: int) -> Select:
-    """Return a SQLAlchemy statement that finds similar places."""
-    distance = PlaceEmbedding.embedding.cosine_distance(query_vector)
-    return (
-        select(PlaceEmbedding.place_id, func.min(distance).label("score"))
-        .where(PlaceEmbedding.category == category)
-        .group_by(PlaceEmbedding.place_id)
-        .order_by("score")
-        .limit(limit)
-    )
 
 
 def recommend_places(
     db: Session,
     categories: CategoryInfo,
     limit: int | None = None,
-    location_filter: dict[str, float] | None = None,  # {"latitude": float, "longitude": float, "radius_km": float}
-) -> tuple[list[PlaceOut], CategoryInfo, dict[int, float]]:
-    """Return recommended places and per-place weighted scores (place_id -> score)."""
+    location_filter: dict[str, float] | None = None,
+) -> tuple[list[PlaceOut], CategoryInfo, dict[int, float], dict[int, dict[str, float]]]:
+    """위치 필터가 있으면 먼저 위도/경도 반경으로 후보를 줄이고, 그 안에서만 카테고리별 벡터 검색.
+    각 리뷰(행)에 대해 쿼리와의 유사도 검색을 하고, 장소별로 그 유사도(거리)의 평균을 내서 랭킹. 중복/빈도 보정 없음.
+    반환: (places, extracted_categories, place_scores, place_scores_by_category)."""
     limit = limit or settings.recommendation_top_k
     
-    # 각 카테고리별로 유사 장소 찾기 (가중치 적용)
-    place_scores: dict[int, float] = {}  # place_id -> weighted_score
-    
+    candidate_place_ids: list[int] | None = None
+    if location_filter:
+        from math import radians, cos, sin, asin, sqrt
+        R = 6371.0
+        lat = location_filter["latitude"]
+        lon = location_filter["longitude"]
+        radius_km = location_filter.get("radius_km") or settings.recommendation_default_radius_km
+        all_places = db.execute(select(Place)).scalars().all()
+        candidate_place_ids = []
+        lat1, lon1 = radians(lat), radians(lon)
+        for place in all_places:
+            if place.latitude is None or place.longitude is None:
+                continue
+            lat2, lon2 = radians(place.latitude), radians(place.longitude)
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+            c = 2 * asin(sqrt(a))
+            if R * c <= radius_km:
+                candidate_place_ids.append(place.id)
+        if not candidate_place_ids:
+            return [], categories, {}, {}
+
+    # LLM이 추출한 업종(place_type)이 있으면 해당 업종 장소만 후보로 제한
+    if getattr(categories, "place_type", None):
+        place_type = (categories.place_type or "").strip()
+        if place_type:
+            stmt_place_type = select(Place.id).where(Place.category.ilike(f"%{place_type}%"))
+            if candidate_place_ids is not None:
+                stmt_place_type = stmt_place_type.where(Place.id.in_(candidate_place_ids))
+            candidate_place_ids = [row[0] for row in db.execute(stmt_place_type).fetchall()]
+            if not candidate_place_ids:
+                return [], categories, {}, {}
+
+    # 메뉴가 구체적으로 지정됐을 때: 해당 메뉴와 유사한 리뷰 메뉴 임베딩이 있는 장소만 후보로 제한
+    # (예: "짜장면" 요청 시 훠궈집은 리뷰에 "훠궈" 등만 있어 거리가 멀어 제외됨)
+    if categories.menu and (categories.menu or "").strip():
+        menu_vector = llm_service.embed_text((categories.menu or "").strip())
+        dist_expr = PlaceEmbedding.embedding.cosine_distance(menu_vector)
+        stmt_menu = (
+            select(PlaceEmbedding.place_id)
+            .where(PlaceEmbedding.category == "menu")
+            .where(dist_expr <= MENU_MATCH_DISTANCE_THRESHOLD)
+            .distinct()
+        )
+        if candidate_place_ids is not None:
+            stmt_menu = stmt_menu.where(PlaceEmbedding.place_id.in_(candidate_place_ids))
+        menu_qualified_ids = [row[0] for row in db.execute(stmt_menu).fetchall()]
+        if menu_qualified_ids:
+            candidate_place_ids = menu_qualified_ids
+
+    menu_specified = bool(categories.menu and (categories.menu or "").strip())
+    place_scores: dict[int, float] = {}
+    place_scores_by_category: dict[int, dict[str, float]] = {}
     for key in CATEGORY_KEYS:
         value = getattr(categories, key)
         if not value:
             continue
-        
         weight = CATEGORY_WEIGHTS.get(key, 1.0)
         vector = llm_service.embed_text(value)
-        
-        # 각 카테고리별로 더 많은 후보를 찾아서 가중치 적용
-        stmt = _similar_places_stmt(key, vector, limit * 3)  # 더 넓게 후보 수집
+        stmt = _similar_places_stmt(key, vector, limit * 5, candidate_place_ids)
         rows = db.execute(stmt).fetchall()
-        
-        for place_id, distance in rows:
-            # cosine_distance는 0에 가까울수록 유사함 (0~2 범위)
-            # 가중치 적용: 거리가 작을수록 높은 점수
-            similarity_score = 1.0 - (distance / 2.0)  # 0~1 범위로 정규화
+        for place_id, avg_distance in rows:
+            similarity_score = 1.0 - (avg_distance / 2.0)
             weighted_score = similarity_score * weight
-            
             if place_id not in place_scores:
                 place_scores[place_id] = 0.0
+                place_scores_by_category[place_id] = {}
             place_scores[place_id] += weighted_score
+            place_scores_by_category[place_id][key] = round(weighted_score, 4)
     
     if not place_scores:
-        return [], categories, {}
-    
-    # 지역 필터링 적용 (있는 경우)
-    if location_filter:
-        places_query = select(Place).where(Place.id.in_(list(place_scores.keys())))
-        all_candidates = db.execute(places_query).scalars().all()
-        
-        filtered_scores = {}
-        lat = location_filter["latitude"]
-        lon = location_filter["longitude"]
-        radius_km = location_filter.get("radius_km", 10.0)  # 기본 10km
-        
-        for place in all_candidates:
-            # 하버사인 공식으로 거리 계산
+        # 카테고리가 하나도 없을 때: 위치 필터가 있으면 반경 내 장소를 거리순으로 반환 (ai_score=0)
+        if location_filter and candidate_place_ids:
             from math import radians, cos, sin, asin, sqrt
-            R = 6371.0  # 지구 반지름 (km)
-            
+            R = 6371.0
+            lat = location_filter["latitude"]
+            lon = location_filter["longitude"]
             lat1, lon1 = radians(lat), radians(lon)
-            lat2, lon2 = radians(place.latitude), radians(place.longitude)
-            
-            dlat = lat2 - lat1
-            dlon = lon2 - lon1
-            
-            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-            c = 2 * asin(sqrt(a))
-            distance_km = R * c
-            
-            if distance_km <= radius_km:
-                filtered_scores[place.id] = place_scores[place.id]
-        
-        # 반경 안에 후보가 있으면 필터 결과 사용, 없으면 위치 필터 무시하고 전체 사용
-        if filtered_scores:
-            place_scores = filtered_scores
+            places_in_radius = db.execute(select(Place).where(Place.id.in_(candidate_place_ids))).scalars().all()
+            with_distance = []
+            for p in places_in_radius:
+                lat2, lon2 = radians(p.latitude), radians(p.longitude)
+                dlat = lat2 - lat1
+                dlon = lon2 - lon1
+                a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+                c = 2 * asin(sqrt(a))
+                with_distance.append((p, R * c))
+            with_distance.sort(key=lambda x: x[1])
+            top_places = [p for p, _ in with_distance[:limit]]
+            top_scores = {p.id: 0.0 for p in top_places}
+            by_cat = {p.id: {} for p in top_places}
+            return [PlaceOut.model_validate(p) for p in top_places], categories, top_scores, by_cat
+        return [], categories, {}, {}
     
-    # 점수 순으로 정렬하여 상위 limit개 선택
     sorted_place_ids = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)[:limit]
-
     if not sorted_place_ids:
-        return [], categories, {}
-
-    top_place_ids = [place_id for place_id, _score in sorted_place_ids]
+        return [], categories, {}, {}
+    top_place_ids = [place_id for place_id, _ in sorted_place_ids]
     top_scores = {pid: score for pid, score in sorted_place_ids}
-
+    # 메뉴가 지정된 경우: 메뉴 기여점수가 너무 낮은 장소는 제외 (짜장면 요청에 훠궈집이 나오는 것 방지)
+    if menu_specified:
+        filtered_ids = [
+            pid for pid in top_place_ids
+            if place_scores_by_category.get(pid, {}).get("menu", 0) >= MENU_MIN_WEIGHTED_SCORE
+        ]
+        if filtered_ids:
+            order_map = {pid: i for i, pid in enumerate(top_place_ids)}
+            filtered_ids.sort(key=lambda p: order_map.get(p, 9999))
+            top_place_ids = filtered_ids[:limit]
+            top_scores = {pid: top_scores[pid] for pid in top_place_ids if pid in top_scores}
+        else:
+            top_place_ids = []
+            top_scores = {}
     places: Iterable[Place] = (
         db.execute(select(Place).where(Place.id.in_(top_place_ids))).scalars().all()
     )
     ordered_places = sorted(places, key=lambda p: top_place_ids.index(p.id))
-    return [PlaceOut.model_validate(p) for p in ordered_places], categories, top_scores
+    # 카테고리별 점수는 top_place_ids에 있는 것만 (나머지는 버림)
+    top_by_cat = {pid: place_scores_by_category.get(pid, {}) for pid in top_place_ids}
+    return [PlaceOut.model_validate(p) for p in ordered_places], categories, top_scores, top_by_cat
 
 

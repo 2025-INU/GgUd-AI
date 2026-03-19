@@ -4,6 +4,8 @@ Spring Boot 백엔드와 통합된 AI 추천 서버입니다.
 
 ## 구조
 
+추천 시스템 설계·구현 방식은 **[docs/RECOMMENDATION.md](docs/RECOMMENDATION.md)** 에 정리되어 있습니다.
+
 ```
 backend/
 ├── app/                    # FastAPI 애플리케이션
@@ -66,10 +68,79 @@ AWS_REGION=ap-northeast-2
 S3_BUCKET_NAME=ggud-places-data
 ```
 
+### 데이터베이스 분리 (GgUd-AI 전용 DB)
+
+- **GgUd-AI**는 장소·리뷰·리뷰 임베딩만 사용합니다. `DATABASE_URL`은 이 데이터를 담는 **전용 DB**로 두는 것을 권장합니다.
+- **Spring Backend**는 별도 DB를 사용하며, Kakao Map·S3(메타데이터) 조회는 Backend에서 수행합니다.
+- 배포 시: ECS 크롤링 → S3 업로드 → SQS → Lambda → RDS(places/reviews/review_embeddings) 파이프라인으로 동일하게 구성할 수 있습니다.
+
 ## 실행
 
+### 방법 1: 전체 Docker로 실행 (DB + API 한 번에)
+
+**1) Docker 네트워크 생성 (최초 1회)**  
 ```bash
-# 개발 모드
+docker network create ggud-network
+```
+
+**2) API 이미지 빌드**  
+```bash
+cd /Users/ung/캡스톤/ggud_local/GgUd-AI
+docker build -t ggud/ggud-ai:latest .
+```
+
+**3) 서비스 기동**  
+```bash
+docker compose up -d
+```
+
+- DB는 `localhost:5433`, API는 `http://localhost:8000` 에 떠 있습니다.
+- 로그 보기: `docker compose logs -f ai-server`
+- 중지: `docker compose down`
+
+코드 수정 후 반영하려면 다시 빌드 후 재기동해야 합니다.  
+```bash
+docker compose build --no-cache ai-server && docker compose up -d ai-server
+```
+
+---
+
+### 방법 2: 로컬에서 API만 실행 (DB만 Docker)
+
+코드 수정 시 바로 반영되게 하려면 API는 로컬 uvicorn, DB만 Docker로 띄우는 방식이 편합니다.
+
+**1) DB만 Docker로 기동**  
+```bash
+cd /Users/ung/캡스톤/ggud_local/GgUd-AI
+docker network create ggud-network   # 최초 1회
+docker compose up -d db-ai
+```
+
+**2) .env 확인**  
+- `DATABASE_URL=postgresql+psycopg2://ggud_user:ggud_db_pw@localhost:5433/ggud_db` 처럼 **localhost:5433** 이어야 합니다.
+
+**3) 가상환경 활성화 후 API 실행**  
+```bash
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+- API: http://localhost:8000  
+- 파일 저장 시 자동 리로드됩니다.
+
+---
+
+### 요약
+
+| 구분 | 방법 1 (전체 Docker) | 방법 2 (로컬 API) |
+|------|----------------------|--------------------|
+| DB | Docker `db-ai` | Docker `db-ai` |
+| API | Docker `ai-server` | 로컬 uvicorn |
+| 코드 반영 | 이미지 재빌드 필요 | 저장 시 자동 리로드 |
+| 사용 예 | 배포·동작 확인용 | 일상 개발용 |
+
+```bash
+# 개발 모드 (방법 2 사용 시)
 uvicorn app.main:app --reload
 
 # 프로덕션 모드
@@ -93,8 +164,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 # 장소 크롤링
 python scripts/naver_crawl.py --query "홍대 카페" --limit 50
 
-# 리뷰 크롤링
-python scripts/review_crawl.py --place-id 123456 --max-count 100
+# 리뷰 크롤링 (DB 적재 + 선택적 S3 업로드)
+python scripts/crawl_reviews_from_db.py --max-count 100
+# .env에 S3_BUCKET_NAME이 있으면 리뷰를 S3에 reviews/{place_id}/reviews.json 으로 업로드
+python scripts/crawl_reviews_from_db.py --place-ids 123,456 --max-count 50
 ```
 
 ### DB 관리
@@ -111,16 +184,10 @@ python scripts/generate_embeddings.py
 
 ## Docker 배포
 
+전체 실행 방법은 위 **방법 1: 전체 Docker로 실행** 을 참고하세요.
+
 ```bash
-# 이미지 빌드
+# 이미지만 단독 실행할 때
 docker build -t ggud-ai-server .
-
-# 컨테이너 실행
 docker run -p 8000:8000 --env-file .env ggud-ai-server
-```
-
-또는 통합 Docker Compose 사용:
-```bash
-# 루트에서
-docker-compose -f docker-compose.prod.yml up -d ai-server
 ```
