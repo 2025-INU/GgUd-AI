@@ -18,16 +18,19 @@ class PlaceEmbedding(Base):
     __table_args__ = (
         UniqueConstraint(
             "place_id",
+            "review_id",
             "category",
             "value_text",
-            name="uq_review_category_value",
+            name="uq_review_embedding_per_review",
         ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     place_id = Column(ForeignKey("places.id", ondelete="CASCADE"), nullable=False)
+    review_id = Column(ForeignKey("reviews.id", ondelete="CASCADE"), nullable=False)
     category = Column(String(50), nullable=False)  # companion, menu, mood, purpose
     value_text = Column(Text, nullable=False)  # 카테고리 값 (예: "친구", "카페", "조용한")
     embedding = Column(Vector(1536), nullable=False)  # 카테고리 값의 임베딩
 
     place = relationship("Place")
+    review = relationship("Review")

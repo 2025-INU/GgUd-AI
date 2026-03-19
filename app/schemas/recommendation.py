@@ -17,8 +17,14 @@ class RecommendationDebug(BaseModel):
     extracted_categories: CategoryInfo
 
 
+class RecommendationItem(PlaceOut):
+    """추천 결과 한 건 (장소 정보 + 유사도 점수)."""
+    ai_score: Optional[float] = Field(None, description="AI 점수 (0~100)")
+    similarity_score: Optional[float] = Field(None, description="유사도 검색 raw 점수 (가중 합)")
+
+
 class RecommendationResponse(BaseModel):
-    items: list[PlaceOut]
+    items: list[RecommendationItem]
     meta: RecommendationDebug
 
 
@@ -34,14 +40,15 @@ class PlaceRecommendRequest(BaseModel):
 
 class PlaceRecommendationItem(BaseModel):
     """Spring Boot 호출 형식 응답 항목"""
-    place_id: str = Field(..., description="장소 ID")
-    place_name: str = Field(..., description="장소 이름")
-    category: str = Field(..., description="카테고리")
-    address: str = Field(..., description="주소")
-    latitude: float = Field(..., description="위도")
-    longitude: float = Field(..., description="경도")
+    place_id: str = Field(..., description="장소 ID (PK)")
     ai_score: Optional[float] = Field(None, description="AI 점수 (0~100)")
+    similarity_score: Optional[float] = Field(None, description="유사도 검색 raw 점수 (가중 합, 정규화 전)")
     distance_from_midpoint: Optional[float] = Field(None, description="중간지점으로부터의 거리 (km)")
+    place_name: Optional[str] = Field(None, description="장소 이름 (Backend S3)")
+    category: Optional[str] = Field(None, description="카테고리")
+    address: Optional[str] = Field(None, description="주소")
+    latitude: Optional[float] = Field(None, description="위도")
+    longitude: Optional[float] = Field(None, description="경도")
 
 
 class PlaceRecommendResponse(BaseModel):

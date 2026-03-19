@@ -14,13 +14,10 @@ class Place(Base):
     id = Column(BigInteger, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     category = Column(String(100), nullable=False)
-    origin_address = Column(Text, nullable=False)
-    road_address = Column(Text)  # 도로명 주소
+    road_address = Column(Text, nullable=False)
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
-    rating = Column(Float)  # 평균 평점
     review_count = Column(Integer, default=0)  # 리뷰 개수
-    phone = Column(String(50))  # 전화번호
     crawled_at = Column(DateTime, nullable=False)  # 크롤링 시점
     updated_at = Column(DateTime)  # 마지막 업데이트 시점
 

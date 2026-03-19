@@ -48,14 +48,24 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from utils.storage_manager import PlaceStorageManager
-
 # S3 업로드 (선택적)
 try:
     from utils.s3_storage import S3StorageManager
     S3_AVAILABLE = True
 except ImportError:
     S3_AVAILABLE = False
+
+# DB 적재 (선택적, DATABASE_URL 있을 때)
+try:
+    from app.db.session import SessionLocal
+    from app.services.recommendation import upsert_place
+    from datetime import datetime
+    DB_AVAILABLE = True
+except Exception:
+    SessionLocal = None
+    upsert_place = None
+    datetime = None
+    DB_AVAILABLE = False
 
 # 타임아웃 상수 (ms)
 TIMEOUT = 20000
@@ -327,8 +337,9 @@ class NaverMapPlaceCrawler:
             await detail_page.close()
 
         return {
-            "origin_address": origin_address,
-            "address": road_address,
+            # DB에는 도로명 주소만 road_address로 저장
+            "road_address": road_address or origin_address,
+            "address": road_address or origin_address,
             "latitude": latitude,
             "longitude": longitude,
         }
@@ -350,10 +361,16 @@ class NaverMapPlaceCrawler:
                                 if (key.startsWith('RestaurantListSummary:') || key.startsWith('Place:')) {
                                     const data = apollo[key];
                                     if (data && data.name && data.id) {
-                                        // totalReviewCount가 "1,331" 형식일 수 있으므로 쉼표 제거 후 파싱
+                                        // 방문자 리뷰 수(visitorReviewCount 또는 visitorReviewsTotal)를 우선 사용하고,
+                                        // 없으면 totalReviewCount(방문자+블로그 등 합계)를 사용
                                         let reviewCount = 0;
-                                        if (data.totalReviewCount) {
-                                            const countStr = String(data.totalReviewCount).replace(/,/g, '');
+                                        const visitor = data.visitorReviewCount || data.visitorReviewsTotal;
+                                        const total = data.totalReviewCount;
+                                        if (visitor) {
+                                            const countStr = String(visitor).replace(/,/g, '');
+                                            reviewCount = parseInt(countStr) || 0;
+                                        } else if (total) {
+                                            const countStr = String(total).replace(/,/g, '');
                                             reviewCount = parseInt(countStr) || 0;
                                         }
                                         
@@ -361,14 +378,10 @@ class NaverMapPlaceCrawler:
                                             place_id: data.id,
                                             name: data.name,
                                             category: data.category || data.businessCategory || '',
-                                            road_address: data.roadAddress || null,
-                                            origin_address: data.address || null,
-                                            common_address: data.commonAddress || null,
+                                            address: data.roadAddress || data.address || null,
                                             latitude: data.y ? parseFloat(data.y) : null,
                                             longitude: data.x ? parseFloat(data.x) : null,
-                                            phone: data.virtualPhone || data.phone || null,
                                             review_count: reviewCount,
-                                            image_url: data.imageUrl || null,
                                         });
                                     }
                                 }
@@ -393,10 +406,16 @@ class NaverMapPlaceCrawler:
                         if (key.startsWith('RestaurantListSummary:') || key.startsWith('Place:')) {
                             const data = apollo[key];
                             if (data && data.name && data.id) {
-                                // totalReviewCount가 "1,331" 형식일 수 있으므로 쉼표 제거 후 파싱
+                                // 방문자 리뷰 수(visitorReviewCount 또는 visitorReviewsTotal)를 우선 사용하고,
+                                // 없으면 totalReviewCount(방문자+블로그 등 합계)를 사용
                                 let reviewCount = 0;
-                                if (data.totalReviewCount) {
-                                    const countStr = String(data.totalReviewCount).replace(/,/g, '');
+                                const visitor = data.visitorReviewCount || data.visitorReviewsTotal;
+                                const total = data.totalReviewCount;
+                                if (visitor) {
+                                    const countStr = String(visitor).replace(/,/g, '');
+                                    reviewCount = parseInt(countStr) || 0;
+                                } else if (total) {
+                                    const countStr = String(total).replace(/,/g, '');
                                     reviewCount = parseInt(countStr) || 0;
                                 }
                                 
@@ -404,14 +423,10 @@ class NaverMapPlaceCrawler:
                                     place_id: data.id,
                                     name: data.name,
                                     category: data.category || data.businessCategory || '',
-                                    road_address: data.roadAddress || null,
-                                    origin_address: data.address || null,
-                                    common_address: data.commonAddress || null,
+                                    address: data.roadAddress || data.address || null,
                                     latitude: data.y ? parseFloat(data.y) : null,
                                     longitude: data.x ? parseFloat(data.x) : null,
-                                    phone: data.virtualPhone || data.phone || null,
                                     review_count: reviewCount,
-                                    image_url: data.imageUrl || null,
                                 });
                             }
                         }
@@ -433,14 +448,11 @@ class NaverMapPlaceCrawler:
                     "name": data.get("name"),
                     "category": data.get("category"),
                     "page": page_num,
-                    "origin_address": data.get("origin_address"),
-                    "address": data.get("road_address"),
-                    "common_address": data.get("common_address"),
+                    "road_address": data.get("address"),
+                    "address": data.get("address"),
                     "latitude": data.get("latitude"),
                     "longitude": data.get("longitude"),
-                    "phone": data.get("phone"),
                     "review_count": data.get("review_count"),
-                    "image_url": data.get("image_url"),
                 })
             return results
 
@@ -587,17 +599,6 @@ def run_cli() -> None:
         help="stdout에 JSON 배열 출력 (API 연동용)",
     )
     parser.add_argument(
-        "--jsonl-path",
-        type=Path,
-        default=None,
-        help="저장할 JSONL 경로 (기본: storage_manager 설정)",
-    )
-    parser.add_argument(
-        "--skip-jsonl",
-        action="store_true",
-        help="JSONL 저장을 건너뜀 (API 호출용)",
-    )
-    parser.add_argument(
         "--s3-bucket",
         type=str,
         default=os.getenv("S3_BUCKET_NAME") or os.getenv("S3_BUCKET"),
@@ -619,32 +620,65 @@ def run_cli() -> None:
 
     results = asyncio.run(crawl_places(args.query, args.limit, verbose=not args.json_output))
 
-    # storage_manager append (optional)
-    new_results = results
-    if not args.skip_jsonl:
-        if args.jsonl_path:
-            manager = PlaceStorageManager(str(args.jsonl_path))
-        else:
-            manager = PlaceStorageManager()
-        existing = manager.load_existing_place_ids()
-        new_results = [
-            item
-            for item in results
-            if item.get("place_id") and item["place_id"] not in existing
-        ]
-        manager.append(new_results)
+    # 크롤링 한 번에 끝난 뒤, 한번에 DB 적재 (place_id 기준 upsert → 중복 제거)
+    if DB_AVAILABLE and os.getenv("DATABASE_URL") and results:
+        db = SessionLocal()
+        try:
+            db_success = 0
+            db_skip = 0
+            for place in results:
+                place_id_raw = place.get("place_id")
+                if not place_id_raw:
+                    db_skip += 1
+                    continue
+                try:
+                    place_id = int(place_id_raw)
+                except (ValueError, TypeError):
+                    db_skip += 1
+                    continue
+                name = place.get("name")
+                category = place.get("category") or "기타"
+                origin_address = place.get("origin_address") or place.get("address") or ""
+                latitude = place.get("latitude")
+                longitude = place.get("longitude")
+                if not name or latitude is None or longitude is None:
+                    db_skip += 1
+                    continue
+                payload = {
+                    "id": place_id,
+                    "name": name,
+                    "category": category,
+                    "origin_address": origin_address,
+                    "latitude": float(latitude),
+                    "longitude": float(longitude),
+                    "crawled_at": datetime.now(),
+                    "review_count": place.get("review_count") if place.get("review_count") is not None else 0,
+                    "phone": (place.get("phone") or "").strip() or None,
+                    "updated_at": datetime.now(),
+                }
+                upsert_place(db, payload)
+                db_success += 1
+            if not args.json_output:
+                print(f"\nDB 적재: {db_success}개 (place_id 기준 upsert, 스킵 {db_skip}개)")
+        except Exception as e:
+            if not args.json_output:
+                print(f"\nDB 적재 실패: {e}", file=sys.stderr)
+        finally:
+            db.close()
 
-    # S3 업로드 (선택적)
-    if args.s3_bucket and S3_AVAILABLE:
+    # S3 업로드 (선택적) - 크롤한 결과 전부 한번에 업로드
+    if args.s3_bucket and S3_AVAILABLE and results:
         try:
             s3_manager = S3StorageManager(
                 bucket_name=args.s3_bucket,
                 aws_access_key_id=args.aws_access_key_id or os.getenv("AWS_ACCESS_KEY_ID"),
                 aws_secret_access_key=args.aws_secret_access_key or os.getenv("AWS_SECRET_ACCESS_KEY"),
             )
-            
+
             uploaded_count = 0
-            for place in new_results:
+            for place in results:
+                if not place.get("place_id"):
+                    continue
                 try:
                     s3_manager.upload_place_raw_data(
                         place_id=str(place.get("place_id")),
@@ -654,21 +688,21 @@ def run_cli() -> None:
                 except Exception as e:
                     if not args.json_output:
                         print(f"S3 업로드 실패 (place_id={place.get('place_id')}): {str(e)}", file=sys.stderr)
-            
+
             if not args.json_output:
-                print(f"\nS3에 {uploaded_count}개 장소 원본 데이터 업로드 완료")
+                print(f"S3에 {uploaded_count}개 장소 원본 데이터 업로드 완료")
         except Exception as e:
             if not args.json_output:
                 print(f"S3 업로드 초기화 실패: {str(e)}", file=sys.stderr)
-    elif args.s3_bucket and not S3_AVAILABLE:
+    elif args.s3_bucket and not S3_AVAILABLE and results:
         if not args.json_output:
             print("S3 업로드를 위해 s3_storage 모듈이 필요합니다.", file=sys.stderr)
 
     if args.json_output:
-        print(json.dumps(new_results, ensure_ascii=False))
+        print(json.dumps(results, ensure_ascii=False))
     else:
-        print_results_summary(new_results)
-        print(f"\n새로 저장한 장소 수: {len(new_results)}개 (중복 제외)")
+        print_results_summary(results)
+        print(f"\n크롤한 장소 수: {len(results)}개")
 
 
 if __name__ == "__main__":

@@ -61,8 +61,8 @@ def ingest_from_crawl(
         except (ValueError, TypeError):
             continue
 
-        origin_address = place.get("origin_address") or place.get("address")
-        if not origin_address:
+        road_address = place.get("origin_address") or place.get("address")
+        if not road_address:
             continue
         latitude = place.get("latitude")
         longitude = place.get("longitude")
@@ -78,9 +78,10 @@ def ingest_from_crawl(
             "id": int(place["place_id"]),
             "name": place["name"],
             "category": place.get("category") or "기타",
-            "origin_address": origin_address,
+            "road_address": road_address,
             "latitude": float(latitude),
             "longitude": float(longitude),
+            "review_count": place.get("review_count") if place.get("review_count") is not None else 0,
         }
         upsert_place(db, payload)
         places_ingested += 1

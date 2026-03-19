@@ -1,11 +1,19 @@
 """FastAPI application entry point."""
 
+import logging
+
 from dotenv import load_dotenv
 
 from fastapi import FastAPI
 
 # Load environment variables from .env file
 load_dotenv()
+
+# uvicorn 터미널에서 앱 로그(INFO)가 보이도록 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(name)s: %(message)s",
+)
 
 from app import models  # noqa: F401
 from app.api.routes import router

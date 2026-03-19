@@ -20,6 +20,7 @@ class Settings(BaseModel):
     openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     openai_response_model: str = os.getenv("OPENAI_RESPONSE_MODEL", "gpt-4o-mini")
     recommendation_top_k: int = int(os.getenv("RECOMMENDATION_TOP_K", "5"))
+    recommendation_default_radius_km: float = float(os.getenv("RECOMMENDATION_DEFAULT_RADIUS_KM", "10.0"))
 
 
 @lru_cache

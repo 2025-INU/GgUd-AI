@@ -7,7 +7,7 @@ class PlaceBase(BaseModel):
     id: int = Field(..., description="Unique place identifier")
     name: str
     category: str
-    origin_address: str
+    road_address: str
     latitude: float
     longitude: float
 
@@ -18,7 +18,7 @@ class PlaceCreate(BaseModel):
     id: int
     name: str
     category: str
-    origin_address: str
+    road_address: str
     latitude: float
     longitude: float
 
