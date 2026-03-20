@@ -8,6 +8,7 @@ on:
       - 'Dockerfile'
       - 'docker-compose.yml'
       - 'requirements.txt'
+      - '.github/workflows/cd-prod.yml'
   workflow_dispatch:  # 수동 실행 가능
 
 jobs:
@@ -51,8 +52,8 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /opt/ggud/GgUd-AI
-            docker-compose pull
-            docker-compose --env-file .env up -d --force-recreate
+            docker compose pull
+            docker compose --env-file .env up -d --force-recreate
             docker system prune -af
             echo "Waiting for AI server to start..."
             sleep 30

@@ -2,6 +2,8 @@
 
 Spring Boot 백엔드와 통합된 AI 추천 서버입니다.
 
+CI/CD 자동 실행 확인용 README 업데이트
+
 ## 구조
 
 추천 시스템 설계·구현 방식은 **[docs/RECOMMENDATION.md](docs/RECOMMENDATION.md)** 에 정리되어 있습니다.
