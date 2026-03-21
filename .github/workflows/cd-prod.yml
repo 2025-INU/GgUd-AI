@@ -43,6 +43,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           source: "docker-compose.yml"
           target: "/opt/ggud-ai/"
+          overwrite: true
 
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.0.3
