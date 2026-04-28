@@ -8,6 +8,7 @@ class PlaceBase(BaseModel):
     name: str
     category: str
     road_address: str
+    image_url: str | None = Field(None, description="대표 이미지 URL")
     latitude: float
     longitude: float
 
@@ -19,6 +20,7 @@ class PlaceCreate(BaseModel):
     name: str
     category: str
     road_address: str
+    image_url: str | None = None
     latitude: float
     longitude: float
 

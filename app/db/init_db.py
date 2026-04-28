@@ -4,6 +4,8 @@ from sqlalchemy import text
 
 from app.db.base import Base
 from app.db.session import engine
+from app.models.place import Place  # noqa: F401
+from app.models.place_summary_embedding import PlaceSummaryEmbedding  # noqa: F401
 
 
 def init_db() -> None:

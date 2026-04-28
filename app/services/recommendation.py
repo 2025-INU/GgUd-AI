@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Iterable
 
 from sqlalchemy import Select, func, select
@@ -9,7 +10,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.place import Place
+from app.models.review import Review
 from app.models.review_embedding import PlaceEmbedding
+from app.models.place_summary_embedding import PlaceSummaryEmbedding
 from app.schemas.review import CategoryInfo
 from app.schemas.place import PlaceOut
 from app.services.llm import llm_service
@@ -41,30 +44,46 @@ def _similar_places_stmt(
     limit: int,
     candidate_place_ids: list[int] | None = None,
 ) -> Select:
-    """리뷰(행) 단위로 쿼리와의 코사인 거리를 구한 뒤, 장소별로 그 거리의 평균으로 유사도 계산.
-    중복/빈도 보정 없음: 각 리뷰에 대해 유사도 검색 → 장소별 평균으로 랭킹."""
-    distance = PlaceEmbedding.embedding.cosine_distance(query_vector)
+    """장소 요약 임베딩 단위로 쿼리와 코사인 거리 계산 후 장소별 랭킹."""
+    distance = PlaceSummaryEmbedding.embedding.cosine_distance(query_vector)
     stmt = (
         select(
-            PlaceEmbedding.place_id,
+            PlaceSummaryEmbedding.place_id,
             func.avg(distance).label("avg_distance"),
         )
-        .where(PlaceEmbedding.category == category)
+        .where(PlaceSummaryEmbedding.category == category)
     )
     if candidate_place_ids:
-        stmt = stmt.where(PlaceEmbedding.place_id.in_(candidate_place_ids))
+        stmt = stmt.where(PlaceSummaryEmbedding.place_id.in_(candidate_place_ids))
     return (
-        stmt.group_by(PlaceEmbedding.place_id)
+        stmt.group_by(PlaceSummaryEmbedding.place_id)
         .order_by("avg_distance")
         .limit(limit * 5)
     )
+
+
+def _split_values(value: str | None) -> list[str]:
+    if not value:
+        return []
+    values = [v.strip() for v in str(value).split(",") if v.strip()]
+    return list(dict.fromkeys(values))
 
 
 def upsert_place(db: Session, data: dict) -> Place:
     """Insert or update place metadata."""
     from datetime import datetime
 
-    allowed = ("name", "category", "road_address", "latitude", "longitude", "review_count", "crawled_at", "updated_at")
+    allowed = (
+        "name",
+        "category",
+        "road_address",
+        "image_url",
+        "latitude",
+        "longitude",
+        "review_count",
+        "crawled_at",
+        "updated_at",
+    )
     now = datetime.now()
     try:
         place = db.get(Place, data["id"])
@@ -101,7 +120,9 @@ def refresh_embeddings(db: Session, place_id: int, review_id: int, content: str)
     def split_values(value: str | None) -> list[str]:
         if not value:
             return []
-        return [v.strip() for v in str(value).split(",") if v.strip()]
+        # 동일 리뷰 내 중복 토큰(예: "친구, 친구, 친구")은 한 번만 처리
+        values = [v.strip() for v in str(value).split(",") if v.strip()]
+        return list(dict.fromkeys(values))
     
     categories = llm_service.extract_categories(content)
     inserted = 0
@@ -139,14 +160,99 @@ def refresh_embeddings(db: Session, place_id: int, review_id: int, content: str)
     return categories, inserted
 
 
+def refresh_place_summary_embeddings(db: Session, place_id: int) -> tuple[str, CategoryInfo, int]:
+    """장소의 전체 리뷰를 1개 요약문으로 만들고 카테고리 임베딩을 재생성."""
+    place = db.get(Place, place_id)
+    if not place:
+        return "", CategoryInfo(), 0
+
+    reviews = (
+        db.query(Review.content)
+        .filter(Review.place_id == place_id)
+        .all()
+    )
+    review_texts = [r[0] for r in reviews if r and r[0] and r[0].strip()]
+    if not review_texts:
+        return "", CategoryInfo(), 0
+
+    return refresh_place_summary_embeddings_from_review_texts(
+        db=db,
+        place_id=place_id,
+        review_texts=review_texts,
+        place_name=place.name,
+    )
+
+
+def refresh_place_summary_embeddings_from_review_texts(
+    db: Session,
+    place_id: int,
+    review_texts: list[str],
+    place_name: str | None = None,
+) -> tuple[str, CategoryInfo, int]:
+    """리뷰 텍스트 리스트를 요약해 장소 요약 임베딩을 재생성."""
+    cleaned = [text.strip() for text in review_texts if text and text.strip()]
+    if not cleaned:
+        return "", CategoryInfo(), 0
+
+    summary_text = llm_service.summarize_reviews(cleaned, place_name)
+    if not summary_text:
+        return "", CategoryInfo(), 0
+
+    # 장소별 요약문을 reviews 테이블에 1건으로 유지한다.
+    # review_id는 충돌 방지를 위해 place_id 기반 고정 키를 사용한다.
+    summary_review_id = f"summary:{place_id}"
+    summary_row = db.query(Review).filter(Review.review_id == summary_review_id).first()
+    if summary_row:
+        summary_row.content = summary_text
+        summary_row.author = "__summary__"
+        summary_row.rating = None
+        summary_row.visit_date = None
+        summary_row.crawled_at = datetime.now()
+    else:
+        db.add(
+            Review(
+                place_id=place_id,
+                review_id=summary_review_id,
+                author="__summary__",
+                content=summary_text,
+                rating=None,
+                visit_date=None,
+                crawled_at=datetime.now(),
+            )
+        )
+
+    categories = llm_service.extract_categories(summary_text)
+    db.query(PlaceSummaryEmbedding).filter(PlaceSummaryEmbedding.place_id == place_id).delete()
+
+    inserted = 0
+    for key in CATEGORY_KEYS:
+        values = _split_values(getattr(categories, key))
+        for single_value in values:
+            embedding = llm_service.embed_text(single_value)
+            db.add(
+                PlaceSummaryEmbedding(
+                    place_id=place_id,
+                    category=key,
+                    value_text=single_value,
+                    summary_text=summary_text,
+                    embedding=embedding,
+                )
+            )
+            inserted += 1
+
+    db.commit()
+    return summary_text, categories, inserted
+
+
 def recommend_places(
     db: Session,
     categories: CategoryInfo,
     limit: int | None = None,
     location_filter: dict[str, float] | None = None,
+    tab: str | None = None,
 ) -> tuple[list[PlaceOut], CategoryInfo, dict[int, float], dict[int, dict[str, float]]]:
     """위치 필터가 있으면 먼저 위도/경도 반경으로 후보를 줄이고, 그 안에서만 카테고리별 벡터 검색.
-    각 리뷰(행)에 대해 쿼리와의 유사도 검색을 하고, 장소별로 그 유사도(거리)의 평균을 내서 랭킹. 중복/빈도 보정 없음.
+    장소 요약 카테고리 임베딩에 대해 유사도 검색 후, 가중합으로 랭킹.
     반환: (places, extracted_categories, place_scores, place_scores_by_category)."""
     limit = limit or settings.recommendation_top_k
     
@@ -173,6 +279,53 @@ def recommend_places(
         if not candidate_place_ids:
             return [], categories, {}, {}
 
+    # 탭 필터: places.category(DB 원본 카테고리) 기준으로 후보를 제한
+    normalized_tab = (tab or "ALL").upper()
+    if normalized_tab in {"CAFE", "BAR", "RESTAURANT"}:
+        stmt = select(Place.id)
+        if candidate_place_ids is not None:
+            stmt = stmt.where(Place.id.in_(candidate_place_ids))
+
+        if normalized_tab == "CAFE":
+            stmt = stmt.where(
+                func.lower(Place.category).contains("카페")
+                | func.lower(Place.category).contains("coffee")
+                | func.lower(Place.category).contains("커피")
+                | func.lower(Place.category).contains("디저트")
+                | func.lower(Place.category).contains("베이커리")
+            )
+        elif normalized_tab == "BAR":
+            stmt = stmt.where(
+                func.lower(Place.category).contains("술")
+                | func.lower(Place.category).contains("주점")
+                | func.lower(Place.category).contains("bar")
+                | func.lower(Place.category).contains("pub")
+                | func.lower(Place.category).contains("이자카야")
+                | func.lower(Place.category).contains("포차")
+                | func.lower(Place.category).contains("와인")
+            )
+        else:  # RESTAURANT
+            cafe_or_bar = (
+                func.lower(Place.category).contains("카페")
+                | func.lower(Place.category).contains("coffee")
+                | func.lower(Place.category).contains("커피")
+                | func.lower(Place.category).contains("디저트")
+                | func.lower(Place.category).contains("베이커리")
+                | func.lower(Place.category).contains("술")
+                | func.lower(Place.category).contains("주점")
+                | func.lower(Place.category).contains("bar")
+                | func.lower(Place.category).contains("pub")
+                | func.lower(Place.category).contains("이자카야")
+                | func.lower(Place.category).contains("포차")
+                | func.lower(Place.category).contains("와인")
+            )
+            stmt = stmt.where(~cafe_or_bar)
+
+        tab_candidate_ids = [row[0] for row in db.execute(stmt).fetchall()]
+        if not tab_candidate_ids:
+            return [], categories, {}, {}
+        candidate_place_ids = tab_candidate_ids
+
     # LLM이 추출한 업종(place_type)이 있으면 해당 업종 장소만 후보로 제한
     if getattr(categories, "place_type", None):
         place_type = (categories.place_type or "").strip()
@@ -184,19 +337,18 @@ def recommend_places(
             if not candidate_place_ids:
                 return [], categories, {}, {}
 
-    # 메뉴가 구체적으로 지정됐을 때: 해당 메뉴와 유사한 리뷰 메뉴 임베딩이 있는 장소만 후보로 제한
-    # (예: "짜장면" 요청 시 훠궈집은 리뷰에 "훠궈" 등만 있어 거리가 멀어 제외됨)
+    # 메뉴가 구체적으로 지정됐을 때: 해당 메뉴와 유사한 요약 메뉴 임베딩이 있는 장소만 후보로 제한
     if categories.menu and (categories.menu or "").strip():
         menu_vector = llm_service.embed_text((categories.menu or "").strip())
-        dist_expr = PlaceEmbedding.embedding.cosine_distance(menu_vector)
+        dist_expr = PlaceSummaryEmbedding.embedding.cosine_distance(menu_vector)
         stmt_menu = (
-            select(PlaceEmbedding.place_id)
-            .where(PlaceEmbedding.category == "menu")
+            select(PlaceSummaryEmbedding.place_id)
+            .where(PlaceSummaryEmbedding.category == "menu")
             .where(dist_expr <= MENU_MATCH_DISTANCE_THRESHOLD)
             .distinct()
         )
         if candidate_place_ids is not None:
-            stmt_menu = stmt_menu.where(PlaceEmbedding.place_id.in_(candidate_place_ids))
+            stmt_menu = stmt_menu.where(PlaceSummaryEmbedding.place_id.in_(candidate_place_ids))
         menu_qualified_ids = [row[0] for row in db.execute(stmt_menu).fetchall()]
         if menu_qualified_ids:
             candidate_place_ids = menu_qualified_ids

@@ -15,7 +15,9 @@ logging.basicConfig(
     format="%(levelname)s: %(name)s: %(message)s",
 )
 
-from app import models  # noqa: F401
+# init_db()가 create_all()을 호출하므로, 여기서는 테이블 생성에 필요한 모델만 import해서 등록한다.
+from app.models.place import Place  # noqa: F401
+from app.models.place_summary_embedding import PlaceSummaryEmbedding  # noqa: F401
 from app.api.routes import router
 from app.api.endpoints import spring_integration
 from app.core.config import settings

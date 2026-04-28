@@ -54,7 +54,7 @@ def load_station_names(csv_path: Path, encoding: str = "euc-kr") -> list[str]:
     return names
 
 
-def run_naver_crawl(query: str, limit: int = 30, verbose: bool = True) -> bool:
+def run_naver_crawl(query: str, limit: int = 30, verbose: bool = True, thumbnail_only: bool = False) -> bool:
     """naver_crawl.py를 서브프로세스로 실행. 성공 여부 반환."""
     cmd = [
         sys.executable,
@@ -62,6 +62,8 @@ def run_naver_crawl(query: str, limit: int = 30, verbose: bool = True) -> bool:
         "--query", query,
         "--limit", str(limit),
     ]
+    if thumbnail_only:
+        cmd.append("--thumbnail-only")
     if verbose:
         print(f"  [크롤링] {query}", flush=True)
     result = subprocess.run(cmd, cwd=str(BACKEND_ROOT))
@@ -152,6 +154,11 @@ def main() -> None:
         action="store_true",
         help="크롤링 쿼리 로그 최소화",
     )
+    parser.add_argument(
+        "--thumbnail-only",
+        action="store_true",
+        help="대표 이미지 고화질 보강(상세 페이지) 없이 리스트 썸네일만 사용 (가장 빠름)",
+    )
     args = parser.parse_args()
 
     stations = load_station_names(args.csv)
@@ -166,8 +173,18 @@ def main() -> None:
 
     for i, name in enumerate(stations, 1):
         print(f"[{i}/{len(stations)}] {name}")
-        run_naver_crawl(f"{name} 맛집", limit=args.limit_per_query, verbose=not args.quiet)
-        run_naver_crawl(f"{name} 카페", limit=args.limit_per_query, verbose=not args.quiet)
+        run_naver_crawl(
+            f"{name} 맛집",
+            limit=args.limit_per_query,
+            verbose=not args.quiet,
+            thumbnail_only=args.thumbnail_only,
+        )
+        run_naver_crawl(
+            f"{name} 카페",
+            limit=args.limit_per_query,
+            verbose=not args.quiet,
+            thumbnail_only=args.thumbnail_only,
+        )
 
     print("=" * 60)
     print("크롤링 완료.")

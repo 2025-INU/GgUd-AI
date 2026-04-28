@@ -36,6 +36,12 @@ class PlaceRecommendRequest(BaseModel):
     limit: Optional[int] = Field(10, ge=1, le=20, description="추천 개수 (기본 10개)")
     latitude: Optional[float] = Field(None, description="중간지점 위도")
     longitude: Optional[float] = Field(None, description="중간지점 경도")
+    tab: Optional[str] = Field("ALL", description="추천 탭 (ALL, RESTAURANT, CAFE, BAR)")
+    context_summary: Optional[str] = Field(None, description="약속 맥락 요약")
+    time_slot: Optional[str] = Field(None, description="약속 시간대")
+    preferred_categories: list[str] = Field(default_factory=list, description="사용자 선호 카테고리")
+    preferred_regions: list[str] = Field(default_factory=list, description="사용자 선호 지역")
+    participant_count: Optional[int] = Field(None, description="참여자 수")
 
 
 class PlaceRecommendationItem(BaseModel):
@@ -47,8 +53,10 @@ class PlaceRecommendationItem(BaseModel):
     place_name: Optional[str] = Field(None, description="장소 이름 (Backend S3)")
     category: Optional[str] = Field(None, description="카테고리")
     address: Optional[str] = Field(None, description="주소")
+    image_url: Optional[str] = Field(None, description="대표 이미지 URL")
     latitude: Optional[float] = Field(None, description="위도")
     longitude: Optional[float] = Field(None, description="경도")
+    summary_text: Optional[str] = Field(None, description="디버그용 장소 요약 텍스트")
 
 
 class PlaceRecommendResponse(BaseModel):

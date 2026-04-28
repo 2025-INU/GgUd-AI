@@ -1,9 +1,11 @@
 """Spring Boot integration endpoints."""
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models.place_summary_embedding import PlaceSummaryEmbedding
 from app.schemas.recommendation import PlaceRecommendRequest, PlaceRecommendResponse, PlaceRecommendationItem
 from app.services.llm import llm_service
 from app.services.recommendation import CATEGORY_WEIGHTS, recommend_places, MAX_RAW_SCORE
@@ -45,7 +47,7 @@ def recommend_places_for_spring(
         }
     
     items, extracted, place_scores, place_scores_by_category = recommend_places(
-        db, categories, payload.limit, location_filter
+        db, categories, payload.limit, location_filter, payload.tab
     )
 
     # 절대점수: 만점 100점, raw를 MAX_RAW_SCORE 기준으로 환산 후 소수 둘째자리
@@ -69,13 +71,24 @@ def recommend_places_for_spring(
     center_lat = location_filter["latitude"] if location_filter else None
     center_lon = location_filter["longitude"] if location_filter else None
 
+    place_ids = [item.id for item in items]
+    place_summary_map: dict[int, str] = {}
+    if place_ids:
+        rows = db.execute(
+            select(PlaceSummaryEmbedding.place_id, PlaceSummaryEmbedding.summary_text)
+            .where(PlaceSummaryEmbedding.place_id.in_(place_ids))
+            .distinct(PlaceSummaryEmbedding.place_id)
+        ).fetchall()
+        place_summary_map = {place_id: summary for place_id, summary in rows if summary}
+
     recommendations = []
     for item in items:
         raw = place_scores.get(item.id, 0.0)
         by_cat = place_scores_by_category.get(item.id, {})
+        summary_text = place_summary_map.get(item.id)
         logger.info(
-            "[추천 점수] place_id=%s name=%s category=%s total=%.4f | by_category=%s",
-            item.id, item.name, item.category, raw, by_cat,
+            "[추천 점수] place_id=%s name=%s category=%s total=%.4f | by_category=%s | summary_exists=%s",
+            item.id, item.name, item.category, raw, by_cat, bool(summary_text),
         )
         dist = None
         if center_lat is not None and center_lon is not None and item.latitude is not None and item.longitude is not None:
@@ -89,8 +102,10 @@ def recommend_places_for_spring(
                 place_name=item.name,
                 category=item.category,
                 address=item.road_address,
+                image_url=getattr(item, "image_url", None),
                 latitude=item.latitude,
                 longitude=item.longitude,
+                summary_text=summary_text,
             )
         )
     

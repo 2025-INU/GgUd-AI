@@ -33,9 +33,11 @@ def _run_command(args: list[str]) -> str:
     return completed.stdout.strip()
 
 
-def fetch_places_from_cli(query: str) -> list[dict[str, Any]]:
+def fetch_places_from_cli(query: str, thumbnail_only: bool = False) -> list[dict[str, Any]]:
     """Invoke naver_crawl.py and return place dicts."""
     cmd = [PYTHON_BIN, str(NAVER_SCRIPT), "--query", query, "--json-output"]
+    if thumbnail_only:
+        cmd.append("--thumbnail-only")
     stdout = _run_command(cmd)
     if not stdout:
         return []
@@ -45,9 +47,10 @@ def fetch_places_from_cli(query: str) -> list[dict[str, Any]]:
 def ingest_from_crawl(
     db: Session,
     query: str,
+    thumbnail_only: bool = False,
 ) -> PlaceCrawlSummary:
     """Run crawlers and insert place metadata into DB."""
-    places = fetch_places_from_cli(query)
+    places = fetch_places_from_cli(query, thumbnail_only=thumbnail_only)
     places_ingested = 0
     places_skipped = 0
 
@@ -79,6 +82,7 @@ def ingest_from_crawl(
             "name": place["name"],
             "category": place.get("category") or "기타",
             "road_address": road_address,
+            "image_url": (place.get("image_url") or "").strip() or None,
             "latitude": float(latitude),
             "longitude": float(longitude),
             "review_count": place.get("review_count") if place.get("review_count") is not None else 0,

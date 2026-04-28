@@ -92,6 +92,7 @@ def load_places(jsonl_path: Path, db: Session) -> tuple[int, int, int]:
                 "name": name,
                 "category": category,
                 "road_address": road_address,
+                "image_url": record.get("image_url") or None,
                 "latitude": float(latitude),
                 "longitude": float(longitude),
                 "crawled_at": datetime.now(),

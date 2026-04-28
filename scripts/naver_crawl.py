@@ -72,10 +72,13 @@ TIMEOUT = 20000
 
 
 class NaverMapPlaceCrawler:
-    def __init__(self, headless: bool = True, verbose: bool = True):
+    def __init__(self, headless: bool = True, verbose: bool = True, enrich_images: bool = True):
         self.headless = headless
         self.verbose = verbose
+        self.enrich_images = enrich_images
         self.launch_options = self._get_launch_options()
+        # 상세 페이지 보강(주소/이미지) 동시성 제한 (너무 크게 하면 차단/느려짐)
+        self.detail_concurrency = 5
 
     def _get_launch_options(self) -> dict:
         """브라우저 실행 옵션 반환"""
@@ -159,6 +162,38 @@ class NaverMapPlaceCrawler:
         iframe_element = await page.query_selector("iframe#searchIframe")
         return await iframe_element.content_frame()
 
+    async def _extract_thumbnail_map(self, frame) -> dict[str, str]:
+        """검색 결과 리스트에서 place_id -> thumbnail(src) 맵을 추출."""
+        if not frame:
+            return {}
+        try:
+            rows = await frame.evaluate(
+                """
+                () => {
+                    const out = [];
+                    const items = document.querySelectorAll('li.UEzoS');
+                    for (const li of items) {
+                        const a = li.querySelector('a.place_bluelink');
+                        if (!a) continue;
+                        const href = a.getAttribute('href') || '';
+                        const m = href.match(/\\/place\\/(\\d+)/);
+                        if (!m) continue;
+                        const placeId = m[1];
+                        // 이미지 셀렉터는 종종 바뀜: img 태그를 최대한 넓게 탐색
+                        const img = li.querySelector('img');
+                        const src = img?.getAttribute('src') || img?.getAttribute('data-src') || '';
+                        if (src && src.startsWith('http')) {
+                            out.push([placeId, src]);
+                        }
+                    }
+                    return out;
+                }
+                """
+            )
+            return {pid: src for pid, src in rows} if rows else {}
+        except Exception:
+            return {}
+
     async def _scroll_to_load_all(self, frame):
         """모든 결과가 로드될 때까지 스크롤"""
         previous_count = 0
@@ -230,6 +265,7 @@ class NaverMapPlaceCrawler:
         road_address: Optional[str] = None
         latitude: Optional[float] = None
         longitude: Optional[float] = None
+        image_url: Optional[str] = None
 
         try:
             await detail_page.goto(place_detail_url, wait_until="domcontentloaded")
@@ -244,11 +280,35 @@ class NaverMapPlaceCrawler:
                         if (props.pageProps && props.pageProps.initialState) {
                             const state = props.pageProps.initialState;
                             if (state.place && state.place.location) {
+                                // 대표 이미지 URL은 버전별로 필드명이 자주 바뀌므로 가능한 후보를 넓게 탐색한다.
+                                const place = state.place;
+                                const candidates = [];
+                                // 흔한 케이스들
+                                if (place.imageUrl) candidates.push(place.imageUrl);
+                                if (place.thumbnailUrl) candidates.push(place.thumbnailUrl);
+                                if (place.thumUrl) candidates.push(place.thumUrl);
+                                if (place.mainPhotoUrl) candidates.push(place.mainPhotoUrl);
+                                // photos 배열 형태
+                                if (Array.isArray(place.photos) && place.photos.length > 0) {
+                                    const p0 = place.photos[0];
+                                    if (p0?.url) candidates.push(p0.url);
+                                    if (p0?.imageUrl) candidates.push(p0.imageUrl);
+                                    if (p0?.originUrl) candidates.push(p0.originUrl);
+                                }
+                                // images 배열 형태
+                                if (Array.isArray(place.images) && place.images.length > 0) {
+                                    const i0 = place.images[0];
+                                    if (typeof i0 === "string") candidates.push(i0);
+                                    if (i0?.url) candidates.push(i0.url);
+                                    if (i0?.imageUrl) candidates.push(i0.imageUrl);
+                                }
+                                const imageUrl = candidates.find((v) => typeof v === "string" && v.startsWith("http")) || null;
                                 return {
                                     roadAddress: state.place.location.roadAddress,
                                     address: state.place.location.address,
                                     x: state.place.location.x || state.place.location.lng,
                                     y: state.place.location.y || state.place.location.lat,
+                                    imageUrl,
                                 };
                             }
                         }
@@ -266,6 +326,7 @@ class NaverMapPlaceCrawler:
                     latitude = float(data.get("y")) if data.get("y") else None
                 except (TypeError, ValueError):
                     pass
+                image_url = data.get("imageUrl") or None
 
             # __NEXT_DATA__에서 못 찾았으면 DOM에서 시도 (fallback)
             if not origin_address or not road_address:
@@ -342,7 +403,34 @@ class NaverMapPlaceCrawler:
             "address": road_address or origin_address,
             "latitude": latitude,
             "longitude": longitude,
+            "image_url": image_url,
         }
+
+    async def _enrich_image_urls_with_details(self, apollo_items: list[dict], context) -> list[dict]:
+        """image_url이 없는 항목만 상세페이지로 보강(동시성 제한)."""
+        if not apollo_items:
+            return apollo_items
+
+        sem = asyncio.Semaphore(self.detail_concurrency)
+
+        async def enrich_one(item: dict) -> dict:
+            place_id = item.get("place_id")
+            if not place_id or item.get("image_url"):
+                return item
+            async with sem:
+                try:
+                    detail = await self._extract_address_info(str(place_id), context)
+                    item["image_url"] = detail.get("image_url") or item.get("image_url")
+                except Exception:
+                    pass
+            return item
+
+        # 상세페이지 보강은 비용이 크므로 필요한 항목만 병렬 실행
+        tasks = [enrich_one(d) for d in apollo_items if d.get("place_id") and not d.get("image_url")]
+        if not tasks:
+            return apollo_items
+        await asyncio.gather(*tasks)
+        return apollo_items
 
     async def _extract_place_data(self, places, frame, page, context, page_num: int = 1):
         """장소 데이터 추출 (__APOLLO_STATE__ 우선 사용)"""
@@ -382,6 +470,7 @@ class NaverMapPlaceCrawler:
                                             latitude: data.y ? parseFloat(data.y) : null,
                                             longitude: data.x ? parseFloat(data.x) : null,
                                             review_count: reviewCount,
+                                            image_url: data.imageUrl || data.thumbnailUrl || data.thumUrl || data.mainPhotoUrl || null,
                                         });
                                     }
                                 }
@@ -427,6 +516,7 @@ class NaverMapPlaceCrawler:
                                     latitude: data.y ? parseFloat(data.y) : null,
                                     longitude: data.x ? parseFloat(data.x) : null,
                                     review_count: reviewCount,
+                                    image_url: data.imageUrl || data.thumbnailUrl || data.thumUrl || data.mainPhotoUrl || null,
                                 });
                             }
                         }
@@ -441,9 +531,15 @@ class NaverMapPlaceCrawler:
             # __APOLLO_STATE__에서 데이터를 가져왔으면 바로 사용
             if self.verbose:
                 print(f"__APOLLO_STATE__에서 {len(apollo_data)}개 장소 데이터 추출", file=sys.stderr)
-            
+
+            # 1) 먼저 리스트 DOM에서 thumbnail을 빠르게 확보
+            thumb_map = await self._extract_thumbnail_map(frame)
+
+            normalized = []
             for data in apollo_data:
-                results.append({
+                place_id = data.get("place_id")
+                image_url = data.get("image_url") or (thumb_map.get(str(place_id)) if place_id else None)
+                normalized.append({
                     "place_id": data.get("place_id"),
                     "name": data.get("name"),
                     "category": data.get("category"),
@@ -453,8 +549,13 @@ class NaverMapPlaceCrawler:
                     "latitude": data.get("latitude"),
                     "longitude": data.get("longitude"),
                     "review_count": data.get("review_count"),
+                    "image_url": image_url,
                 })
-            return results
+
+            # 2) 그래도 없는 항목만 상세페이지로 보강 (동시성 제한 병렬)
+            if self.enrich_images:
+                await self._enrich_image_urls_with_details(normalized, context)
+            return normalized
 
         # __APOLLO_STATE__가 없으면 기존 방식 사용 (fallback)
         if self.verbose:
@@ -478,6 +579,7 @@ class NaverMapPlaceCrawler:
                     "address": address_info.get("address"),
                     "latitude": address_info.get("latitude"),
                     "longitude": address_info.get("longitude"),
+                    "image_url": address_info.get("image_url"),
                 }
             )
 
@@ -594,6 +696,11 @@ def run_cli() -> None:
     parser.add_argument("--query", required=True, help="검색어 (예: 송도 맛집)")
     parser.add_argument("--limit", type=int, default=None, help="결과 최대 개수")
     parser.add_argument(
+        "--thumbnail-only",
+        action="store_true",
+        help="대표 이미지 고화질 보강(상세 페이지) 없이 리스트 썸네일만 사용 (가장 빠름)",
+    )
+    parser.add_argument(
         "--json-output",
         action="store_true",
         help="stdout에 JSON 배열 출력 (API 연동용)",
@@ -618,10 +725,18 @@ def run_cli() -> None:
     )
     args = parser.parse_args()
 
-    results = asyncio.run(crawl_places(args.query, args.limit, verbose=not args.json_output))
+    crawler = NaverMapPlaceCrawler(
+        headless=True,
+        verbose=not args.json_output,
+        enrich_images=not args.thumbnail_only,
+    )
+    results = asyncio.run(crawler.crawl_single_page(args.query))
+    if args.limit is not None:
+        results = results[: args.limit]
 
-    # 크롤링 한 번에 끝난 뒤, 한번에 DB 적재 (place_id 기준 upsert → 중복 제거)
-    if DB_AVAILABLE and os.getenv("DATABASE_URL") and results:
+    # JSON 출력 모드(crawl_runner 연동)에서는 사이드 이펙트 없이 결과만 반환.
+    # DB/S3 저장은 호출자(crawl_runner) 쪽에서 단일 경로로 처리한다.
+    if (not args.json_output) and DB_AVAILABLE and os.getenv("DATABASE_URL") and results:
         db = SessionLocal()
         try:
             db_success = 0
@@ -648,7 +763,9 @@ def run_cli() -> None:
                     "id": place_id,
                     "name": name,
                     "category": category,
-                    "origin_address": origin_address,
+                    # DB 컬럼명은 road_address만 허용됨
+                    "road_address": origin_address,
+                    "image_url": (place.get("image_url") or "").strip() or None,
                     "latitude": float(latitude),
                     "longitude": float(longitude),
                     "crawled_at": datetime.now(),
@@ -667,7 +784,7 @@ def run_cli() -> None:
             db.close()
 
     # S3 업로드 (선택적) - 크롤한 결과 전부 한번에 업로드
-    if args.s3_bucket and S3_AVAILABLE and results:
+    if (not args.json_output) and args.s3_bucket and S3_AVAILABLE and results:
         try:
             s3_manager = S3StorageManager(
                 bucket_name=args.s3_bucket,

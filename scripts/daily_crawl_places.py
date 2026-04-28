@@ -47,7 +47,7 @@ def build_default_queries() -> list[str]:
     return [f"{station} {cat}" for station in SEOUL_STATIONS for cat in CATEGORIES]
 
 
-def run_daily_crawl(queries: list[str] | None = None) -> None:
+def run_daily_crawl(queries: list[str] | None = None, thumbnail_only: bool = False) -> None:
     """여러 검색 쿼리에 대해 장소 크롤링 + DB upsert."""
     if not queries:
         queries = build_default_queries()
@@ -60,7 +60,7 @@ def run_daily_crawl(queries: list[str] | None = None) -> None:
         for i, q in enumerate(queries, 1):
             print(f"\n[{i}/{len(queries)}] 쿼리='{q}' 크롤링 시작...", file=sys.stderr)
             try:
-                summary = ingest_from_crawl(db, q)
+                summary = ingest_from_crawl(db, q, thumbnail_only=thumbnail_only)
                 total_ingested += summary.places_fetched
                 total_skipped += summary.places_skipped
                 print(
@@ -81,5 +81,8 @@ def run_daily_crawl(queries: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    run_daily_crawl()
+    # CRAWL_THUMBNAIL_ONLY=1 이면 상세페이지 보강 없이 리스트 썸네일만 사용 (가장 빠름)
+    import os
+    thumbnail_only = os.getenv("CRAWL_THUMBNAIL_ONLY", "").lower() in {"1", "true", "yes"}
+    run_daily_crawl(thumbnail_only=thumbnail_only)
 

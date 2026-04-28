@@ -23,6 +23,8 @@ def crawl_places(payload: PlaceCrawlRequest, db: Session = Depends(get_db)) -> P
         return ingest_from_crawl(
             db,
             query=payload.query,
+            # 기본은 고화질 보강 포함. 빠르게 돌리고 싶으면 환경변수로 제어.
+            thumbnail_only=(__import__("os").getenv("CRAWL_THUMBNAIL_ONLY", "").lower() in {"1", "true", "yes"}),
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
