@@ -304,8 +304,6 @@ class NaverMapReviewCrawler:
         selectors = [
             "div.NSTUp a.fvwqf",  # 일반 더보기 버튼
             "a.fvwqf",  # 더보기 버튼 (간단한 셀렉터)
-            "button:has-text('더보기')",  # 텍스트로 찾기
-            "a:has-text('더보기')",
         ]
         
         for selector in selectors:
@@ -326,10 +324,10 @@ class NaverMapReviewCrawler:
                     logger.debug(f"더보기 버튼 찾기 실패 ({selector}): {str(e)}")
                 continue
         
-        # 더보기 버튼이 없으면 스크롤
+        # 더보기 버튼이 없으면 스크롤로 추가 로드를 시도한다.
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(2)
-        return False
+        return True
 
     async def _scroll_to_load_all(self, page, max_count: int = 100):
         """모든 리뷰가 로드될 때까지 더보기 버튼 클릭 및 스크롤"""
@@ -470,14 +468,12 @@ class NaverMapReviewCrawler:
                 # __APOLLO_STATE__가 없거나 부족하면 DOM 방식 사용
                 if self.verbose:
                     logger.info("__APOLLO_STATE__ 없음 또는 부족, DOM 방식으로 추출")
-                
-                # 더보기 버튼 클릭 및 스크롤하여 모든 리뷰 로드
-                await self._scroll_to_load_all(page, max_count=max_count)
-                
-                # DOM에서 리뷰 추출 (반복적으로 추출하여 최신 상태 유지)
+
+                # DOM에서 리뷰 추출을 먼저 수행하고, 매 반복마다 누적한 뒤 더보기를 누른다.
+                # (화면 상태가 중간에 바뀌어도 이미 수집한 리뷰는 보존)
                 while len(reviews) < max_count:
                     dom_reviews = await self._extract_reviews_from_dom(page, place_id)
-                    
+
                     new_reviews_added = False
                     for review in dom_reviews:
                         review_id = review.get("id")
@@ -503,9 +499,13 @@ class NaverMapReviewCrawler:
                     # 목표 개수 도달
                     if len(reviews) >= max_count:
                         break
-                    
-                    # 더보기 버튼 다시 클릭 시도
-                    await self._load_more_reviews(page)
+
+                    # 더보기 버튼 클릭/스크롤 시도. 더 이상 진행이 안 되면 종료.
+                    progressed = await self._load_more_reviews(page)
+                    if not progressed:
+                        if self.verbose:
+                            logger.info("더 이상 로드할 리뷰가 없습니다.")
+                        break
                     await asyncio.sleep(1)
 
             except Exception as e:

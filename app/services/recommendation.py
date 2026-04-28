@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Iterable
 
 from sqlalchemy import Select, func, select
@@ -166,11 +165,15 @@ def refresh_place_summary_embeddings(db: Session, place_id: int) -> tuple[str, C
     if not place:
         return "", CategoryInfo(), 0
 
-    reviews = (
-        db.query(Review.content)
-        .filter(Review.place_id == place_id)
-        .all()
-    )
+    try:
+        reviews = (
+            db.query(Review.content)
+            .filter(Review.place_id == place_id)
+            .all()
+        )
+    except Exception:
+        # 신규 파이프라인에서 reviews 테이블이 없을 수 있음.
+        return "", CategoryInfo(), 0
     review_texts = [r[0] for r in reviews if r and r[0] and r[0].strip()]
     if not review_texts:
         return "", CategoryInfo(), 0
@@ -197,29 +200,6 @@ def refresh_place_summary_embeddings_from_review_texts(
     summary_text = llm_service.summarize_reviews(cleaned, place_name)
     if not summary_text:
         return "", CategoryInfo(), 0
-
-    # 장소별 요약문을 reviews 테이블에 1건으로 유지한다.
-    # review_id는 충돌 방지를 위해 place_id 기반 고정 키를 사용한다.
-    summary_review_id = f"summary:{place_id}"
-    summary_row = db.query(Review).filter(Review.review_id == summary_review_id).first()
-    if summary_row:
-        summary_row.content = summary_text
-        summary_row.author = "__summary__"
-        summary_row.rating = None
-        summary_row.visit_date = None
-        summary_row.crawled_at = datetime.now()
-    else:
-        db.add(
-            Review(
-                place_id=place_id,
-                review_id=summary_review_id,
-                author="__summary__",
-                content=summary_text,
-                rating=None,
-                visit_date=None,
-                crawled_at=datetime.now(),
-            )
-        )
 
     categories = llm_service.extract_categories(summary_text)
     db.query(PlaceSummaryEmbedding).filter(PlaceSummaryEmbedding.place_id == place_id).delete()

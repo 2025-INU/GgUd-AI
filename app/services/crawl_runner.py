@@ -33,9 +33,15 @@ def _run_command(args: list[str]) -> str:
     return completed.stdout.strip()
 
 
-def fetch_places_from_cli(query: str, thumbnail_only: bool = False) -> list[dict[str, Any]]:
+def fetch_places_from_cli(
+    query: str,
+    thumbnail_only: bool = False,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     """Invoke naver_crawl.py and return place dicts."""
     cmd = [PYTHON_BIN, str(NAVER_SCRIPT), "--query", query, "--json-output"]
+    if limit is not None:
+        cmd.extend(["--limit", str(limit)])
     if thumbnail_only:
         cmd.append("--thumbnail-only")
     stdout = _run_command(cmd)
@@ -48,9 +54,10 @@ def ingest_from_crawl(
     db: Session,
     query: str,
     thumbnail_only: bool = False,
+    limit: int | None = None,
 ) -> PlaceCrawlSummary:
     """Run crawlers and insert place metadata into DB."""
-    places = fetch_places_from_cli(query, thumbnail_only=thumbnail_only)
+    places = fetch_places_from_cli(query, thumbnail_only=thumbnail_only, limit=limit)
     places_ingested = 0
     places_skipped = 0
 

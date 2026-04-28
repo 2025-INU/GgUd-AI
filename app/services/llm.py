@@ -188,6 +188,44 @@ class LLMService:
         # 지역명만 있으면 None 반환 (Spring에서 중간지점 계산하도록)
         return None
 
+    def summarize_reviews(self, reviews: list[str], place_name: str | None = None) -> str:
+        """여러 리뷰를 카테고리 추출 친화적인 단일 요약문으로 생성."""
+        cleaned_reviews = [r.strip() for r in reviews if r and r.strip()]
+        if not cleaned_reviews:
+            return ""
+
+        max_reviews = 30
+        max_chars_per_review = 220
+        clipped = [r[:max_chars_per_review] for r in cleaned_reviews[:max_reviews]]
+        context = "\n".join(f"- {line}" for line in clipped)
+        place_info = f"장소명: {place_name}\n" if place_name else ""
+
+        system_prompt = (
+            "너는 여러 사용자 리뷰를 1개의 대표 리뷰로 압축 요약하는 어시스턴트야. "
+            "추천 시스템에서 카테고리(companion/menu/mood/purpose)를 잘 추출할 수 있게 "
+            "핵심 키워드를 빠뜨리지 말고 한국어로 요약해."
+        )
+        user_prompt = (
+            f"{place_info}"
+            "아래 리뷰들을 바탕으로 단일 요약 리뷰를 작성해줘.\n"
+            "조건:\n"
+            "1) 250~700자 사이의 자연스러운 한국어 문단 1개\n"
+            "2) 동행자, 메뉴, 분위기, 방문목적 관련 단서를 최대한 포함\n"
+            "3) 긍정/부정 포인트를 균형 있게 포함\n"
+            "4) 없는 사실을 만들지 말 것\n\n"
+            f"리뷰 목록:\n{context}"
+        )
+
+        response = self._client.chat.completions.create(
+            model=settings.openai_response_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.2,
+        )
+        return (response.choices[0].message.content or "").strip()
+
     def embed_text(self, text: str) -> list[float]:
         """Return OpenAI embedding vector."""
         result = self._client.embeddings.create(

@@ -1,20 +1,11 @@
 """
-지하철역 CSV 기준으로 역별 "역명 맛집", "역명 카페" 자동 크롤링.
+지하철역 기준으로 역별 "역명 식당", "역명 카페", "역명 술집" 자동 크롤링.
 
-플로우: 장소 크롤링 → DB 적재 → 리뷰 크롤링 → 임베딩 생성 (한 번에 실행)
+플로우: 장소 크롤링 → DB 적재 → 리뷰 크롤링 → 요약 저장 + 요약 임베딩 저장
 
 사용법:
-  # 기본: 장소 + DB 적재 + 리뷰 + 임베딩
+  # 기본: 역 전체 대상 크롤링 + DB 적재 + 리뷰 + 임베딩
   python scripts/crawl_near_stations.py
-
-  # 테스트: 상위 3개 역만, 리뷰 10개씩
-  python scripts/crawl_near_stations.py --max-stations 3 --max-reviews 10
-
-  # DB 적재만 (리뷰/임베딩 스킵)
-  python scripts/crawl_near_stations.py --no-reviews
-
-  # DB 적재 안 함
-  python scripts/crawl_near_stations.py --no-load
 """
 
 from __future__ import annotations
@@ -32,6 +23,26 @@ BACKEND_ROOT = SCRIPT_DIR.parent
 # Backend CSV (ggud_local/Backend/...)
 BACKEND_CSV = BACKEND_ROOT.parent / "Backend" / "src" / "main" / "resources" / "data" / "seoul_subway_stations.csv"
 CRAWL_KEYWORDS: tuple[str, ...] = ("식당", "카페", "술집")
+LIMIT_PER_QUERY = 100
+MAX_REVIEWS_PER_PLACE = 100
+THUMBNAIL_ONLY = True
+
+# app 모듈 import를 위해 경로 추가
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from app.db.session import SessionLocal
+from app.services.crawl_runner import ingest_from_crawl
+
+
+def normalize_station_query_name(station_name: str) -> str:
+    """검색 쿼리용 역명 정규화: '서울' -> '서울역', 이미 '역'이면 그대로."""
+    name = (station_name or "").strip()
+    if not name:
+        return name
+    if name.endswith("역"):
+        return name
+    return f"{name}역"
 
 
 def load_station_names(csv_path: Path, encoding: str = "euc-kr") -> list[str]:
@@ -83,36 +94,8 @@ def load_station_names_from_backend_db() -> list[str]:
     return [row[0] for row in rows if row[0]]
 
 
-def run_naver_crawl(query: str, limit: int = 30, verbose: bool = True, thumbnail_only: bool = False) -> bool:
-    """naver_crawl.py를 서브프로세스로 실행. 성공 여부 반환."""
-    cmd = [
-        sys.executable,
-        str(BACKEND_ROOT / "scripts" / "naver_crawl.py"),
-        "--query", query,
-        "--limit", str(limit),
-    ]
-    if thumbnail_only:
-        cmd.append("--thumbnail-only")
-    if verbose:
-        print(f"  [크롤링] {query}", flush=True)
-    result = subprocess.run(cmd, cwd=str(BACKEND_ROOT))
-    return result.returncode == 0
-
-
-def run_load_places(jsonl_path: Path) -> bool:
-    """load_places.py 실행. places.jsonl → DB 적재."""
-    cmd = [
-        sys.executable,
-        str(BACKEND_ROOT / "scripts" / "load_places.py"),
-        "--file", str(jsonl_path),
-    ]
-    print("\n[DB 적재] places.jsonl → PostgreSQL", flush=True)
-    result = subprocess.run(cmd, cwd=str(BACKEND_ROOT))
-    return result.returncode == 0
-
-
 def run_crawl_reviews(max_reviews: int = 20, limit_places: int | None = None) -> bool:
-    """crawl_reviews_from_db.py 실행. DB 장소별 리뷰 크롤링 → reviews 테이블 저장."""
+    """crawl_reviews_from_db.py 실행. 리뷰 크롤링 + 요약 저장 + 요약 임베딩 저장."""
     cmd = [
         sys.executable,
         str(BACKEND_ROOT / "scripts" / "crawl_reviews_from_db.py"),
@@ -125,42 +108,9 @@ def run_crawl_reviews(max_reviews: int = 20, limit_places: int | None = None) ->
     return result.returncode == 0
 
 
-def run_generate_embeddings(limit_places: int | None = None) -> bool:
-    """generate_embeddings.py 실행. 리뷰 → place_embeddings 생성 (추천에 사용)."""
-    cmd = [
-        sys.executable,
-        str(BACKEND_ROOT / "scripts" / "generate_embeddings.py"),
-    ]
-    if limit_places is not None:
-        cmd.extend(["--limit", str(limit_places)])
-    print("\n[임베딩 생성] 리뷰에서 카테고리 추출 및 임베딩 생성", flush=True)
-    result = subprocess.run(cmd, cwd=str(BACKEND_ROOT))
-    return result.returncode == 0
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="지하철역 기준 역별 식당/카페/술집 자동 크롤링",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    parser.add_argument(
-        "--station-source",
-        choices=("db", "csv"),
-        default="db",
-        help="역명 소스 선택 (기본: db, 실패 시 csv fallback)",
-    )
-    parser.add_argument(
-        "--csv",
-        type=Path,
-        default=BACKEND_CSV,
-        help=f"지하철역 CSV 경로 (기본: {BACKEND_CSV})",
-    )
-    parser.add_argument(
-        "--limit-per-query",
-        type=int,
-        default=30,
-        help="역당 맛집/카페 검색 시 각각 최대 개수 (기본: 30)",
     )
     parser.add_argument(
         "--max-stations",
@@ -168,80 +118,54 @@ def main() -> None:
         default=None,
         help="처리할 역 개수 제한 (테스트용, 기본: 전부)",
     )
-    parser.add_argument(
-        "--no-load",
-        action="store_true",
-        help="크롤링만 하고 load_places(DB 적재) 하지 않음",
-    )
-    parser.add_argument(
-        "--no-reviews",
-        action="store_true",
-        help="DB 적재만 하고 리뷰 크롤링·임베딩 생성 스킵",
-    )
-    parser.add_argument(
-        "--max-reviews",
-        type=int,
-        default=20,
-        help="장소당 리뷰 최대 수집 개수 (기본: 20)",
-    )
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="크롤링 쿼리 로그 최소화",
-    )
-    parser.add_argument(
-        "--thumbnail-only",
-        action="store_true",
-        help="대표 이미지 고화질 보강(상세 페이지) 없이 리스트 썸네일만 사용 (가장 빠름)",
-    )
     args = parser.parse_args()
 
     stations: list[str] = []
-    if args.station_source == "db":
-        try:
-            stations = load_station_names_from_backend_db()
-            print(f"역명 소스: Backend DB ({len(stations)}개)", file=sys.stderr)
-        except Exception as exc:
-            print(f"[WARN] Backend DB 역명 조회 실패: {exc}", file=sys.stderr)
-            print("[WARN] CSV 소스로 fallback합니다.", file=sys.stderr)
-            stations = load_station_names(args.csv)
-    else:
-        stations = load_station_names(args.csv)
+    try:
+        stations = load_station_names_from_backend_db()
+        print(f"역명 소스: Backend DB ({len(stations)}개)", file=sys.stderr)
+    except Exception as exc:
+        print(f"[WARN] Backend DB 역명 조회 실패: {exc}", file=sys.stderr)
+        print("[WARN] CSV 소스로 fallback합니다.", file=sys.stderr)
+        stations = load_station_names(BACKEND_CSV)
 
-    if args.max_stations is not None:
-        stations = stations[: args.max_stations]
     if not stations:
         print("역 목록이 비어 있습니다.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"총 {len(stations)}개 역 대상 (역당 식당/카페/술집 각 {args.limit_per_query}개)")
+    if args.max_stations is not None:
+        stations = stations[: args.max_stations]
+
+    print(f"총 {len(stations)}개 역 대상 (역당 식당/카페/술집 각 {LIMIT_PER_QUERY}개)")
     print("=" * 60)
+    total_ingested = 0
+    total_skipped = 0
 
-    for i, name in enumerate(stations, 1):
-        print(f"[{i}/{len(stations)}] {name}")
-        for keyword in CRAWL_KEYWORDS:
-            run_naver_crawl(
-                f"{name} {keyword}",
-                limit=args.limit_per_query,
-                verbose=not args.quiet,
-                thumbnail_only=args.thumbnail_only,
-            )
+    db = SessionLocal()
+    try:
+        for i, name in enumerate(stations, 1):
+            print(f"[{i}/{len(stations)}] {name}")
+            station_query_name = normalize_station_query_name(name)
+            for keyword in CRAWL_KEYWORDS:
+                query = f"{station_query_name} {keyword}"
+                summary = ingest_from_crawl(
+                    db,
+                    query,
+                    thumbnail_only=THUMBNAIL_ONLY,
+                    limit=LIMIT_PER_QUERY,
+                )
+                total_ingested += summary.places_fetched
+                total_skipped += summary.places_skipped
+                print(
+                    f"  [DB upsert] {query} -> 신규 {summary.places_fetched}개, 스킵 {summary.places_skipped}개",
+                    flush=True,
+                )
+    finally:
+        db.close()
 
     print("=" * 60)
-    print("크롤링 완료.")
-
-    if not args.no_load:
-        jsonl_path = BACKEND_ROOT / "places.jsonl"
-        if jsonl_path.exists():
-            run_load_places(jsonl_path)
-
-            if not args.no_reviews:
-                # max_stations 있을 때만 리뷰/임베딩 처리 장소 수 제한 (테스트용)
-                limit_places = args.max_stations * 10 if args.max_stations else None
-                run_crawl_reviews(max_reviews=args.max_reviews, limit_places=limit_places)
-                run_generate_embeddings(limit_places=limit_places)
-        else:
-            print("places.jsonl이 없어 DB 적재를 건너뜁니다.", file=sys.stderr)
+    print(f"크롤링+DB upsert 완료. 신규 {total_ingested}개, 스킵 {total_skipped}개")
+    run_crawl_reviews(max_reviews=MAX_REVIEWS_PER_PLACE, limit_places=None)
 
 
 if __name__ == "__main__":
