@@ -20,15 +20,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
+from sqlalchemy import create_engine, text
 
 # GgUd-AI 프로젝트 루트
 SCRIPT_DIR = Path(__file__).resolve().parent
 BACKEND_ROOT = SCRIPT_DIR.parent
 # Backend CSV (ggud_local/Backend/...)
 BACKEND_CSV = BACKEND_ROOT.parent / "Backend" / "src" / "main" / "resources" / "data" / "seoul_subway_stations.csv"
+CRAWL_KEYWORDS: tuple[str, ...] = ("식당", "카페", "술집")
 
 
 def load_station_names(csv_path: Path, encoding: str = "euc-kr") -> list[str]:
@@ -52,6 +55,32 @@ def load_station_names(csv_path: Path, encoding: str = "euc-kr") -> list[str]:
                 seen.add(name)
                 names.append(name)
     return names
+
+
+def load_station_names_from_backend_db() -> list[str]:
+    """Backend DB의 subway_stations 테이블에서 역명 목록 조회."""
+    backend_db_url = os.getenv("BACKEND_DATABASE_URL")
+    if not backend_db_url:
+        host = os.getenv("BACKEND_DB_HOST", "127.0.0.1")
+        port = os.getenv("BACKEND_DB_PORT", "5432")
+        user = os.getenv("BACKEND_DB_USER", "ggud_user")
+        password = os.getenv("BACKEND_DB_PASSWORD", "ggud_db_pw")
+        dbname = os.getenv("BACKEND_DB_NAME", "ggud_db")
+        backend_db_url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
+
+    engine = create_engine(backend_db_url)
+    sql = text(
+        """
+        SELECT DISTINCT station_name
+        FROM subway_stations
+        WHERE station_name IS NOT NULL
+          AND station_name <> ''
+        ORDER BY station_name
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [row[0] for row in rows if row[0]]
 
 
 def run_naver_crawl(query: str, limit: int = 30, verbose: bool = True, thumbnail_only: bool = False) -> bool:
@@ -111,9 +140,15 @@ def run_generate_embeddings(limit_places: int | None = None) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="지하철역 CSV 기준 역별 맛집/카페 자동 크롤링",
+        description="지하철역 기준 역별 식당/카페/술집 자동 크롤링",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
+    )
+    parser.add_argument(
+        "--station-source",
+        choices=("db", "csv"),
+        default="db",
+        help="역명 소스 선택 (기본: db, 실패 시 csv fallback)",
     )
     parser.add_argument(
         "--csv",
@@ -161,30 +196,36 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    stations = load_station_names(args.csv)
+    stations: list[str] = []
+    if args.station_source == "db":
+        try:
+            stations = load_station_names_from_backend_db()
+            print(f"역명 소스: Backend DB ({len(stations)}개)", file=sys.stderr)
+        except Exception as exc:
+            print(f"[WARN] Backend DB 역명 조회 실패: {exc}", file=sys.stderr)
+            print("[WARN] CSV 소스로 fallback합니다.", file=sys.stderr)
+            stations = load_station_names(args.csv)
+    else:
+        stations = load_station_names(args.csv)
+
     if args.max_stations is not None:
         stations = stations[: args.max_stations]
     if not stations:
         print("역 목록이 비어 있습니다.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"총 {len(stations)}개 역 대상 (역당 맛집/카페 각 {args.limit_per_query}개)")
+    print(f"총 {len(stations)}개 역 대상 (역당 식당/카페/술집 각 {args.limit_per_query}개)")
     print("=" * 60)
 
     for i, name in enumerate(stations, 1):
         print(f"[{i}/{len(stations)}] {name}")
-        run_naver_crawl(
-            f"{name} 맛집",
-            limit=args.limit_per_query,
-            verbose=not args.quiet,
-            thumbnail_only=args.thumbnail_only,
-        )
-        run_naver_crawl(
-            f"{name} 카페",
-            limit=args.limit_per_query,
-            verbose=not args.quiet,
-            thumbnail_only=args.thumbnail_only,
-        )
+        for keyword in CRAWL_KEYWORDS:
+            run_naver_crawl(
+                f"{name} {keyword}",
+                limit=args.limit_per_query,
+                verbose=not args.quiet,
+                thumbnail_only=args.thumbnail_only,
+            )
 
     print("=" * 60)
     print("크롤링 완료.")
