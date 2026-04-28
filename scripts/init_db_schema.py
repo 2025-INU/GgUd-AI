@@ -19,9 +19,8 @@ sys.path.insert(0, str(BACKEND_ROOT))
 
 from sqlalchemy import text
 
-from app.models.place import Place  # noqa: F401
-from app.models.place_summary_embedding import PlaceSummaryEmbedding  # noqa: F401
-from app.db.base import Base
+from app.models.place import Place
+from app.models.place_summary_embedding import PlaceSummaryEmbedding
 from app.db.session import engine
 
 
@@ -35,8 +34,9 @@ def init_db_schema() -> None:
         conn.commit()
         print("✅ pgvector extension 생성 완료")
     
-    # 테이블 생성
-    Base.metadata.create_all(bind=engine)
+    # 필요한 테이블만 생성 (불필요 테이블 재생성 방지)
+    Place.__table__.create(bind=engine, checkfirst=True)
+    PlaceSummaryEmbedding.__table__.create(bind=engine, checkfirst=True)
     print("✅ 테이블 생성 완료")
     
     print("\n📋 생성된 테이블:")
