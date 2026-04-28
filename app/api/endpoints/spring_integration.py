@@ -103,6 +103,7 @@ def recommend_places_for_spring(
                 category=item.category,
                 address=item.road_address,
                 image_url=getattr(item, "image_url", None),
+                ai_summary=getattr(item, "ai_summary", None),
                 latitude=item.latitude,
                 longitude=item.longitude,
                 summary_text=summary_text,

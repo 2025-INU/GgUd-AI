@@ -79,8 +79,9 @@ def ingest_from_crawl(
         if latitude is None or longitude is None:
             continue
 
-        # DB에 이미 존재하는 경우에만 스킵
-        if db.get(Place, place_id):
+        # 이미 존재하더라도 ai_summary/image_url이 비어있으면 보강 업데이트한다.
+        existing = db.get(Place, place_id)
+        if existing and existing.image_url and existing.ai_summary:
             places_skipped += 1
             continue
 
@@ -90,6 +91,7 @@ def ingest_from_crawl(
             "category": place.get("category") or "기타",
             "road_address": road_address,
             "image_url": (place.get("image_url") or "").strip() or None,
+            "ai_summary": (place.get("ai_summary") or "").strip() or None,
             "latitude": float(latitude),
             "longitude": float(longitude),
             "review_count": place.get("review_count") if place.get("review_count") is not None else 0,

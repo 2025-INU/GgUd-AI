@@ -54,6 +54,7 @@ class PlaceRecommendationItem(BaseModel):
     category: Optional[str] = Field(None, description="카테고리")
     address: Optional[str] = Field(None, description="주소")
     image_url: Optional[str] = Field(None, description="대표 이미지 URL")
+    ai_summary: Optional[str] = Field(None, description="네이버 지도 AI 요약 문구")
     latitude: Optional[float] = Field(None, description="위도")
     longitude: Optional[float] = Field(None, description="경도")
     summary_text: Optional[str] = Field(None, description="디버그용 장소 요약 텍스트")

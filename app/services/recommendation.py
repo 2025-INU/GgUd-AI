@@ -77,6 +77,7 @@ def upsert_place(db: Session, data: dict) -> Place:
         "category",
         "road_address",
         "image_url",
+        "ai_summary",
         "latitude",
         "longitude",
         "review_count",

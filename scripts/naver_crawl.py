@@ -266,6 +266,7 @@ class NaverMapPlaceCrawler:
         latitude: Optional[float] = None
         longitude: Optional[float] = None
         image_url: Optional[str] = None
+        ai_summary: Optional[str] = None
 
         try:
             await detail_page.goto(place_detail_url, wait_until="domcontentloaded")
@@ -302,6 +303,26 @@ class NaverMapPlaceCrawler:
                                     if (i0?.url) candidates.push(i0.url);
                                     if (i0?.imageUrl) candidates.push(i0.imageUrl);
                                 }
+
+                                // AI 요약 문구 후보를 넓게 탐색
+                                const summaryCandidates = [
+                                    place.aiSummary,
+                                    place.summary,
+                                    place.oneLineSummary,
+                                    place.oneSentenceSummary,
+                                    place.oneSentenceIntro,
+                                    place.microReview,
+                                    place.introduction,
+                                    place.shortIntroduction,
+                                    state.place?.microReview,
+                                    state.place?.summary,
+                                    state.place?.aiSummary,
+                                    state.place?.introduction,
+                                ];
+                                const aiSummary = summaryCandidates.find(
+                                    (v) => typeof v === "string" && v.trim().length > 0
+                                ) || null;
+
                                 const imageUrl = candidates.find((v) => typeof v === "string" && v.startsWith("http")) || null;
                                 return {
                                     roadAddress: state.place.location.roadAddress,
@@ -309,6 +330,7 @@ class NaverMapPlaceCrawler:
                                     x: state.place.location.x || state.place.location.lng,
                                     y: state.place.location.y || state.place.location.lat,
                                     imageUrl,
+                                    aiSummary,
                                 };
                             }
                         }
@@ -357,6 +379,37 @@ class NaverMapPlaceCrawler:
                                     break
                         except:
                             continue
+
+            # AI 요약 문구 DOM fallback
+            if not ai_summary:
+                try:
+                    ai_summary = await detail_page.evaluate(
+                        """
+                        () => {
+                            const aiBadge = Array.from(document.querySelectorAll("*"))
+                                .find((el) => (el.textContent || "").trim() === "AI 요약");
+                            if (!aiBadge) return null;
+
+                            // 같은 라인의 형제/부모 텍스트에서 요약문 후보를 찾는다.
+                            const containers = [
+                                aiBadge.parentElement,
+                                aiBadge.closest("div"),
+                                aiBadge.closest("li"),
+                                aiBadge.closest("section"),
+                            ].filter(Boolean);
+
+                            for (const node of containers) {
+                                const text = (node.textContent || "").replace(/\\s+/g, " ").trim();
+                                if (!text) continue;
+                                const cleaned = text.replace("AI 요약", "").trim();
+                                if (cleaned && cleaned.length >= 8) return cleaned;
+                            }
+                            return null;
+                        }
+                        """
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             if self.verbose:
                 print(f"주소 추출 실패 (place_id={place_id}): {str(e)}", file=sys.stderr)
@@ -404,6 +457,7 @@ class NaverMapPlaceCrawler:
             "latitude": latitude,
             "longitude": longitude,
             "image_url": image_url,
+            "ai_summary": ai_summary,
         }
 
     async def _enrich_image_urls_with_details(self, apollo_items: list[dict], context) -> list[dict]:
@@ -415,18 +469,23 @@ class NaverMapPlaceCrawler:
 
         async def enrich_one(item: dict) -> dict:
             place_id = item.get("place_id")
-            if not place_id or item.get("image_url"):
+            if not place_id or (item.get("image_url") and item.get("ai_summary")):
                 return item
             async with sem:
                 try:
                     detail = await self._extract_address_info(str(place_id), context)
                     item["image_url"] = detail.get("image_url") or item.get("image_url")
+                    item["ai_summary"] = detail.get("ai_summary") or item.get("ai_summary")
                 except Exception:
                     pass
             return item
 
         # 상세페이지 보강은 비용이 크므로 필요한 항목만 병렬 실행
-        tasks = [enrich_one(d) for d in apollo_items if d.get("place_id") and not d.get("image_url")]
+        tasks = [
+            enrich_one(d)
+            for d in apollo_items
+            if d.get("place_id") and (not d.get("image_url") or not d.get("ai_summary"))
+        ]
         if not tasks:
             return apollo_items
         await asyncio.gather(*tasks)
@@ -471,6 +530,7 @@ class NaverMapPlaceCrawler:
                                             longitude: data.x ? parseFloat(data.x) : null,
                                             review_count: reviewCount,
                                             image_url: data.imageUrl || data.thumbnailUrl || data.thumUrl || data.mainPhotoUrl || null,
+                                            ai_summary: data.aiSummary || data.summary || data.oneLineSummary || data.oneSentenceSummary || data.oneSentenceIntro || data.microReview || null,
                                         });
                                     }
                                 }
@@ -517,6 +577,7 @@ class NaverMapPlaceCrawler:
                                     longitude: data.x ? parseFloat(data.x) : null,
                                     review_count: reviewCount,
                                     image_url: data.imageUrl || data.thumbnailUrl || data.thumUrl || data.mainPhotoUrl || null,
+                                    ai_summary: data.aiSummary || data.summary || data.oneLineSummary || data.oneSentenceSummary || data.oneSentenceIntro || data.microReview || null,
                                 });
                             }
                         }
@@ -550,6 +611,7 @@ class NaverMapPlaceCrawler:
                     "longitude": data.get("longitude"),
                     "review_count": data.get("review_count"),
                     "image_url": image_url,
+                    "ai_summary": data.get("ai_summary"),
                 })
 
             # 2) 그래도 없는 항목만 상세페이지로 보강 (동시성 제한 병렬)
@@ -580,6 +642,7 @@ class NaverMapPlaceCrawler:
                     "latitude": address_info.get("latitude"),
                     "longitude": address_info.get("longitude"),
                     "image_url": address_info.get("image_url"),
+                    "ai_summary": address_info.get("ai_summary"),
                 }
             )
 
@@ -766,6 +829,7 @@ def run_cli() -> None:
                     # DB 컬럼명은 road_address만 허용됨
                     "road_address": origin_address,
                     "image_url": (place.get("image_url") or "").strip() or None,
+                    "ai_summary": (place.get("ai_summary") or "").strip() or None,
                     "latitude": float(latitude),
                     "longitude": float(longitude),
                     "crawled_at": datetime.now(),

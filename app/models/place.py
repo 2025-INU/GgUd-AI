@@ -16,6 +16,7 @@ class Place(Base):
     category = Column(String(100), nullable=False)
     road_address = Column(Text, nullable=False)
     image_url = Column(Text)  # 대표 이미지 URL (nullable)
+    ai_summary = Column(Text)  # 네이버 지도 AI 요약 문구 (nullable)
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     review_count = Column(Integer, default=0)  # 리뷰 개수
