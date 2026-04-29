@@ -18,6 +18,7 @@ from app.services.llm import llm_service
 
 
 CATEGORY_KEYS = ("companion", "menu", "mood", "purpose")
+SUMMARY_REVIEW_LIMIT = 100
 
 # 카테고리별 가중치 (고정값)
 CATEGORY_WEIGHTS = {
@@ -161,7 +162,7 @@ def refresh_embeddings(db: Session, place_id: int, review_id: int, content: str)
 
 
 def refresh_place_summary_embeddings(db: Session, place_id: int) -> tuple[str, CategoryInfo, int]:
-    """장소의 전체 리뷰를 1개 요약문으로 만들고 카테고리 임베딩을 재생성."""
+    """장소의 최신 리뷰 최대 100개를 1개 요약문으로 만들고 카테고리 임베딩을 재생성."""
     place = db.get(Place, place_id)
     if not place:
         return "", CategoryInfo(), 0
@@ -170,6 +171,8 @@ def refresh_place_summary_embeddings(db: Session, place_id: int) -> tuple[str, C
         reviews = (
             db.query(Review.content)
             .filter(Review.place_id == place_id)
+            .order_by(Review.created_at.desc().nullslast(), Review.id.desc())
+            .limit(SUMMARY_REVIEW_LIMIT)
             .all()
         )
     except Exception:
