@@ -42,6 +42,9 @@ class PlaceRecommendRequest(BaseModel):
     preferred_categories: list[str] = Field(default_factory=list, description="사용자 선호 카테고리")
     preferred_regions: list[str] = Field(default_factory=list, description="사용자 선호 지역")
     participant_count: Optional[int] = Field(None, description="참여자 수")
+    user_id: Optional[int] = Field(None, description="사용자 ID")
+    past_queries: list[str] = Field(default_factory=list, description="과거 검색 쿼리 목록")
+    past_place_ids: list[int] = Field(default_factory=list, description="과거 선택 장소 ID 목록")
 
 
 class PlaceRecommendationItem(BaseModel):

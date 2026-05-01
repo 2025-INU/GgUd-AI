@@ -8,7 +8,7 @@ from app.db.session import get_db
 from app.models.place_summary_embedding import PlaceSummaryEmbedding
 from app.schemas.recommendation import PlaceRecommendRequest, PlaceRecommendResponse, PlaceRecommendationItem
 from app.services.llm import llm_service
-from app.services.recommendation import CATEGORY_WEIGHTS, recommend_places, MAX_RAW_SCORE
+from app.services.recommendation import CATEGORY_WEIGHTS, recommend_places, MAX_RAW_SCORE, build_profile_vectors, recommend_places_by_profile
 from app.core.config import settings
 
 router = APIRouter(tags=["spring-integration"])
@@ -23,14 +23,6 @@ def recommend_places_for_spring(
     import logging
     logger = logging.getLogger(__name__)
     
-    categories = llm_service.extract_categories_from_query(payload.query)
-    location = llm_service.extract_location_from_query(payload.query)
-    
-    logger.info(
-        "추출 카테고리: companion=%s, menu=%s, mood=%s, purpose=%s, place_type=%s",
-        categories.companion, categories.menu, categories.mood, categories.purpose, getattr(categories, "place_type", None),
-    )
-    
     # 위치 필터링 (우선순위: 요청의 위도/경도 > 쿼리에서 추출한 위치)
     location_filter = None
     if payload.latitude is not None and payload.longitude is not None:
@@ -39,16 +31,63 @@ def recommend_places_for_spring(
             "longitude": payload.longitude,
             "radius_km": settings.recommendation_default_radius_km,
         }
-    elif location:
-        location_filter = {
-            "latitude": location["latitude"],
-            "longitude": location["longitude"],
-            "radius_km": settings.recommendation_default_radius_km,
-        }
-    
-    items, extracted, place_scores, place_scores_by_category = recommend_places(
-        db, categories, payload.limit, location_filter, payload.tab
-    )
+
+    query_is_empty = not (payload.query or "").strip()
+    has_history = bool(payload.past_place_ids)
+
+    if query_is_empty and has_history:
+        # 쿼리 없음 + 히스토리 있음 → 프로필 벡터 기반 개인화 추천
+        logger.info("프로필 기반 추천 모드: user_id=%s, past_place_ids=%s", payload.user_id, payload.past_place_ids)
+
+        profile_vectors = build_profile_vectors(db, payload.past_place_ids)
+
+        # 위치 필터로 후보 장소 ID 추출
+        candidate_place_ids = None
+        if location_filter:
+            from math import radians, cos, sin, asin, sqrt
+            from sqlalchemy import select as sa_select
+            from app.models.place import Place
+            R = 6371.0
+            lat1 = radians(location_filter["latitude"])
+            lon1 = radians(location_filter["longitude"])
+            radius_km = location_filter.get("radius_km") or settings.recommendation_default_radius_km
+            all_places = db.execute(sa_select(Place)).scalars().all()
+            candidate_place_ids = []
+            for place in all_places:
+                if place.latitude is None or place.longitude is None:
+                    continue
+                lat2, lon2 = radians(place.latitude), radians(place.longitude)
+                dlat, dlon = lat2 - lat1, lon2 - lon1
+                a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+                if R * 2 * asin(sqrt(a)) <= radius_km:
+                    candidate_place_ids.append(place.id)
+
+        items, place_scores, place_scores_by_category = recommend_places_by_profile(
+            db, profile_vectors, payload.limit or 10, candidate_place_ids
+        )
+        from app.schemas.review import CategoryInfo
+        extracted = CategoryInfo()
+
+    else:
+        # 쿼리 있음 → 기존 방식
+        location = llm_service.extract_location_from_query(payload.query) if not query_is_empty else None
+        categories = llm_service.extract_categories_from_query(payload.query) if not query_is_empty else __import__('app.schemas.review', fromlist=['CategoryInfo']).CategoryInfo()
+
+        logger.info(
+            "쿼리 기반 추천 모드: companion=%s, menu=%s, mood=%s, purpose=%s, place_type=%s",
+            categories.companion, categories.menu, categories.mood, categories.purpose, getattr(categories, "place_type", None),
+        )
+
+        if not location_filter and location:
+            location_filter = {
+                "latitude": location["latitude"],
+                "longitude": location["longitude"],
+                "radius_km": settings.recommendation_default_radius_km,
+            }
+
+        items, extracted, place_scores, place_scores_by_category = recommend_places(
+            db, categories, payload.limit, location_filter, payload.tab
+        )
 
     # 절대점수: 만점 100점, raw를 MAX_RAW_SCORE 기준으로 환산 후 소수 둘째자리
     def to_absolute_score(raw: float) -> float:

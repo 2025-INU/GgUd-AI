@@ -228,6 +228,73 @@ def refresh_place_summary_embeddings_from_review_texts(
     return summary_text, categories, inserted
 
 
+def build_profile_vectors(
+    db: Session,
+    past_place_ids: list[int],
+) -> dict[str, list[float]]:
+    """과거 선택 장소들의 카테고리별 임베딩 평균을 내어 유저 프로필 벡터를 생성."""
+    if not past_place_ids:
+        return {}
+
+    profile: dict[str, list[list[float]]] = {key: [] for key in CATEGORY_KEYS}
+
+    rows = db.execute(
+        select(PlaceSummaryEmbedding.category, PlaceSummaryEmbedding.embedding)
+        .where(PlaceSummaryEmbedding.place_id.in_(past_place_ids))
+    ).fetchall()
+
+    for category, embedding in rows:
+        if category in profile and embedding is not None:
+            profile[category].append(list(embedding))
+
+    result: dict[str, list[float]] = {}
+    for key, vectors in profile.items():
+        if not vectors:
+            continue
+        dim = len(vectors[0])
+        avg = [sum(v[i] for v in vectors) / len(vectors) for i in range(dim)]
+        result[key] = avg
+
+    return result
+
+
+def recommend_places_by_profile(
+    db: Session,
+    profile_vectors: dict[str, list[float]],
+    limit: int,
+    candidate_place_ids: list[int] | None = None,
+) -> tuple[list[PlaceOut], dict[int, float], dict[int, dict[str, float]]]:
+    """유저 프로필 벡터 기반으로 장소를 추천. 카테고리별 유사도 가중합으로 랭킹."""
+    place_scores: dict[int, float] = {}
+    place_scores_by_category: dict[int, dict[str, float]] = {}
+
+    for key, vector in profile_vectors.items():
+        weight = CATEGORY_WEIGHTS.get(key, 1.0)
+        stmt = _similar_places_stmt(key, vector, limit * 5, candidate_place_ids)
+        rows = db.execute(stmt).fetchall()
+        for place_id, avg_distance in rows:
+            similarity_score = 1.0 - (avg_distance / 2.0)
+            weighted_score = similarity_score * weight
+            if place_id not in place_scores:
+                place_scores[place_id] = 0.0
+                place_scores_by_category[place_id] = {}
+            place_scores[place_id] += weighted_score
+            place_scores_by_category[place_id][key] = round(weighted_score, 4)
+
+    if not place_scores:
+        return [], {}, {}
+
+    sorted_ids = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)[:limit]
+    top_place_ids = [pid for pid, _ in sorted_ids]
+    top_scores = {pid: score for pid, score in sorted_ids}
+
+    places = db.execute(select(Place).where(Place.id.in_(top_place_ids))).scalars().all()
+    ordered = sorted(places, key=lambda p: top_place_ids.index(p.id))
+    top_by_cat = {pid: place_scores_by_category.get(pid, {}) for pid in top_place_ids}
+
+    return [PlaceOut.model_validate(p) for p in ordered], top_scores, top_by_cat
+
+
 def recommend_places(
     db: Session,
     categories: CategoryInfo,
