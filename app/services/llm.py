@@ -185,7 +185,7 @@ class LLMService:
             except (ValueError, TypeError):
                 pass
         
-        # 지역명만 있으면 None 반환 (Spring에서 중간지점 계산하도록)
+        # 지역명만 있으면 None 반환 (Spring에서 중간지점 계산하도록)  
         return None
 
     def summarize_reviews(self, reviews: list[str], place_name: str | None = None) -> str:
