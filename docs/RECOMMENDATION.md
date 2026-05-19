@@ -69,7 +69,7 @@
 
 ## 4. 설정
 
-- **반경 기본값**: `RECOMMENDATION_DEFAULT_RADIUS_KM` (기본 10.0 km)  
+- **반경 기본값**: `RECOMMENDATION_DEFAULT_RADIUS_KM` (기본 5.0 km)  
 - **상위 개수**: `RECOMMENDATION_TOP_K` 또는 요청의 `limit`  
 - **카테고리 가중치**:  
   - 메뉴(menu): 0.4  

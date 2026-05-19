@@ -13,6 +13,7 @@ from app.schemas.recommendation import (
     RecommendationItem,
 )
 from app.services.llm import llm_service
+from app.core.config import settings
 from app.services.recommendation import recommend_places, MAX_RAW_SCORE
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
@@ -31,7 +32,7 @@ def recommend(payload: RecommendationRequest, db: Session = Depends(get_db)) -> 
         location_filter = {
             "latitude": location["latitude"],
             "longitude": location["longitude"],
-            "radius_km": 10.0,  # 기본 10km 반경
+            "radius_km": settings.recommendation_default_radius_km,
         }
     
     items, extracted, place_scores, place_scores_by_category = recommend_places(
