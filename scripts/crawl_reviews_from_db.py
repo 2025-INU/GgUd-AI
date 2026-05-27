@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.models.place import Place
+from app.models.place_summary_embedding import PlaceSummaryEmbedding
 from app.services.recommendation import refresh_place_summary_embeddings_from_review_texts
 
 # S3 (선택): .env에 S3_BUCKET_NAME 있으면 리뷰 업로드
@@ -94,8 +95,12 @@ async def crawl_reviews_from_db(
     max_count: int = 100,
     limit: int | None = None,
     headless: bool = True,
+    skip_done: bool = True,
 ) -> None:
-    """DB에 저장된 장소들에 대해 리뷰 크롤링 후 요약 임베딩 저장."""
+    """DB에 저장된 장소들에 대해 리뷰 크롤링 후 요약 임베딩 저장.
+
+    skip_done=True 면 이미 place_summary_embeddings 에 행이 있는 place_id 는 건너뜀.
+    """
     db = SessionLocal()
     try:
         # 장소 목록 가져오기
@@ -105,8 +110,30 @@ async def crawl_reviews_from_db(
             places = db.query(Place.id).all()
             target_ids = [p.id for p in places]
 
+        original_total = len(target_ids)
+
+        if skip_done and target_ids:
+            done_rows = (
+                db.query(PlaceSummaryEmbedding.place_id)
+                .filter(PlaceSummaryEmbedding.place_id.in_(target_ids))
+                .distinct()
+                .all()
+            )
+            done_set = {r[0] for r in done_rows}
+            target_ids = [pid for pid in target_ids if pid not in done_set]
+            skipped_done = original_total - len(target_ids)
+            if skipped_done > 0:
+                print(
+                    f"[SKIP] 이미 요약 임베딩 있는 {skipped_done}개 장소 건너뜁니다 (--no-skip-done 으로 해제)",
+                    file=sys.stderr,
+                )
+
         if limit:
             target_ids = target_ids[:limit]
+
+        if not target_ids:
+            print("처리할 장소가 없습니다.")
+            return
 
         print(f"📋 총 {len(target_ids)}개 장소에 대해 리뷰 크롤링 시작...")
 
@@ -192,6 +219,11 @@ def main() -> None:
         default=True,
         help="브라우저를 헤드리스 모드로 실행 (기본: True)",
     )
+    parser.add_argument(
+        "--no-skip-done",
+        action="store_true",
+        help="이미 place_summary_embeddings 가 있는 장소도 강제로 재처리",
+    )
     args = parser.parse_args()
 
     place_ids = None
@@ -207,6 +239,7 @@ def main() -> None:
             max_count=args.max_count,
             limit=args.limit,
             headless=args.headless,
+            skip_done=not args.no_skip_done,
         )
     )
 
