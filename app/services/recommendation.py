@@ -37,6 +37,16 @@ MENU_MATCH_DISTANCE_THRESHOLD = 0.45
 # 메뉴 지정 시, 이 가중 점수(menu 기여분) 미만인 장소는 최종 추천에서 제외
 MENU_MIN_WEIGHTED_SCORE = 0.28
 
+# place_type 매칭 후보가 이 수보다 적으면 hard filter 안 걸고 보너스 점수만 부여
+# (예: "떡볶이 집" → LLM이 한식으로 잘못 잡았을 때 3개로 후보가 너무 줄어드는 것 방지)
+PLACE_TYPE_MIN_CANDIDATES = 30
+# place_type 매칭된 장소에 더해줄 보너스 (raw 점수에 가산)
+PLACE_TYPE_BONUS = 0.05
+# 인기도(review_count) 가중치: 최종 점수의 몇 %를 인기도가 좌우할지
+POPULARITY_WEIGHT = 0.15
+# 인기도 log10 정규화 기준: 10^POPULARITY_REF_LOG 리뷰면 만점(1.0)
+POPULARITY_REF_LOG = 4.5  # 10^4.5 ≈ 31,623 리뷰면 만점
+
 
 def _similar_places_stmt(
     category: str,
@@ -377,16 +387,22 @@ def recommend_places(
             return [], categories, {}, {}
         candidate_place_ids = tab_candidate_ids
 
-    # LLM이 추출한 업종(place_type)이 있으면 해당 업종 장소만 후보로 제한
+    # LLM이 추출한 업종(place_type) 매칭.
+    # 후보가 충분히 많으면 hard filter, 너무 적으면 후보를 줄이지 않고 매칭된 곳에만 점수 보너스만 부여
+    # (예: 떡볶이→한식 잘못 매핑돼서 3개로 후보 망가지는 것 방지)
+    place_type_matched_ids: set[int] = set()
     if getattr(categories, "place_type", None):
         place_type = (categories.place_type or "").strip()
         if place_type:
             stmt_place_type = select(Place.id).where(Place.category.ilike(f"%{place_type}%"))
             if candidate_place_ids is not None:
                 stmt_place_type = stmt_place_type.where(Place.id.in_(candidate_place_ids))
-            candidate_place_ids = [row[0] for row in db.execute(stmt_place_type).fetchall()]
-            if not candidate_place_ids:
-                return [], categories, {}, {}
+            matched = [row[0] for row in db.execute(stmt_place_type).fetchall()]
+            if len(matched) >= PLACE_TYPE_MIN_CANDIDATES:
+                candidate_place_ids = matched
+            elif matched:
+                place_type_matched_ids = set(matched)
+            # 0개여도 빈 응답 안 함 → menu 임베딩 매칭이 잡아주도록 통과
 
     # 메뉴가 구체적으로 지정됐을 때: 해당 메뉴와 유사한 요약 메뉴 임베딩이 있는 장소만 후보로 제한
     if categories.menu and (categories.menu or "").strip():
@@ -425,8 +441,17 @@ def recommend_places(
             place_scores_by_category[place_id][key] = round(weighted_score, 4)
     
     if not place_scores:
-        # 카테고리가 하나도 없을 때: 위치 필터가 있으면 반경 내 장소를 거리순으로 반환 (ai_score=0)
-        if location_filter and candidate_place_ids:
+        # 카테고리 점수가 하나도 없을 때 폴백
+        # 0) place_type 이 soft 매칭으로만 잡혀있으면(즉 카테고리 매칭 장소 < 30개) 그쪽을 최우선 풀로 사용
+        fallback_pool: list[int] | None = None
+        if place_type_matched_ids:
+            fallback_pool = list(place_type_matched_ids)
+        elif candidate_place_ids:
+            fallback_pool = candidate_place_ids
+
+        # 1) 위치 필터 + 후보 있음 → 반경 내 거리순 (ai_score=0)
+        if location_filter and fallback_pool:
+            candidate_place_ids = fallback_pool  # 아래 거리/인기도 폴백이 같은 풀을 보게
             from math import radians, cos, sin, asin, sqrt
             R = 6371.0
             lat = location_filter["latitude"]
@@ -446,8 +471,39 @@ def recommend_places(
             top_scores = {p.id: 0.0 for p in top_places}
             by_cat = {p.id: {} for p in top_places}
             return [PlaceOut.model_validate(p) for p in top_places], categories, top_scores, by_cat
+        # 2) 위치는 없지만 업종/탭으로 좁혀진 후보가 있으면 → 인기도순 폴백 (ai_score=0)
+        #    (예: "브런치 먹기 좋은 곳" 같이 menu 임베딩 없이 업종만 잡힌 케이스)
+        if fallback_pool:
+            popular_places = (
+                db.query(Place)
+                .filter(Place.id.in_(fallback_pool))
+                .order_by(Place.review_count.desc().nulls_last())
+                .limit(limit)
+                .all()
+            )
+            top_scores = {p.id: 0.0 for p in popular_places}
+            by_cat = {p.id: {} for p in popular_places}
+            return [PlaceOut.model_validate(p) for p in popular_places], categories, top_scores, by_cat
         return [], categories, {}, {}
     
+    # place_type 보너스 (hard filter 미적용한 경우의 보정)
+    if place_type_matched_ids:
+        for pid in list(place_scores.keys()):
+            if pid in place_type_matched_ids:
+                place_scores[pid] += PLACE_TYPE_BONUS
+
+    # 인기도(review_count) 보너스: 최종 점수 = score × (1 - W + W × pop_normalized)
+    # 적합도(코사인 유사도)는 그대로 두고 인기도가 동률 깨기 + 약한 가산 역할만 하도록 곱셈식으로 합성
+    import math
+    rc_rows = db.execute(
+        select(Place.id, Place.review_count).where(Place.id.in_(list(place_scores.keys())))
+    ).fetchall()
+    rc_map = {pid: (rc or 0) for pid, rc in rc_rows}
+    for pid, score in list(place_scores.items()):
+        rc = rc_map.get(pid, 0)
+        pop = min(1.0, math.log10(max(1, rc)) / POPULARITY_REF_LOG)
+        place_scores[pid] = score * (1.0 - POPULARITY_WEIGHT + POPULARITY_WEIGHT * pop)
+
     sorted_place_ids = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)[:limit]
     if not sorted_place_ids:
         return [], categories, {}, {}
