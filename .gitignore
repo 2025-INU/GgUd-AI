@@ -25,6 +25,10 @@ places_backup_*.jsonl
 # Crawl checkpoint
 scripts/.crawl_progress.json
 
+# Local-only docker compose (서버용은 docker-compose.yml 사용)
+docker-compose.local.yml
+docker-compose.override.yml
+
 # Logs
 *.log
 logs/
