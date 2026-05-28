@@ -1,100 +1,19 @@
-
 services:
-  # FastAPI AI Server
-  ai-server:
-    image: ${DOCKER_USERNAME:-ggud}/ggud-ai:${IMAGE_TAG:-latest}
-    container_name: ggud-ai-server
-    expose:
-      - "8000"
-    environment:
-      # Database Configuration
-      - DATABASE_URL=postgresql+psycopg2://${DB_USERNAME}:${DB_PASSWORD}@db-ai:5432/${DB_NAME:-ggud_db}
-      - DB_HOST=db-ai
-      - DB_PORT=5432
-      - DB_USERNAME=${DB_USERNAME}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME:-ggud_db}
-
-      # OpenAI API
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
-      - OPENAI_RESPONSE_MODEL=${OPENAI_RESPONSE_MODEL:-gpt-4o-mini}
-
-      # Application Settings
-      - PROJECT_NAME=${PROJECT_NAME:-Meetup Recommender API}
-      - API_V1_PREFIX=${API_V1_PREFIX:-/api/v1}
-      - RECOMMENDATION_TOP_K=${RECOMMENDATION_TOP_K:-5}
-
-      # AWS S3 (선택사항)
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - AWS_REGION=${AWS_REGION:-ap-northeast-2}
-      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-}
-
-    depends_on:
-      db-ai:
-        condition: service_healthy
-    networks:
-      - ggud-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    volumes:
-      - /opt/ggud/logs/ai:/app/logs
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.6'
-        reservations:
-          memory: 128M
-          cpus: '0.1'
-
-  # PostgreSQL Database with pgvector (AI Server용)
   db-ai:
     image: ankane/pgvector:v0.5.1
-    container_name: ggud-postgres-ai
+    container_name: ggud-postgres-ai-local
     ports:
-      - "5433:5432"
+      - "${DB_PORT:-5434}:5432"
     environment:
-      - POSTGRES_USER=${DB_USERNAME}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-      - POSTGRES_DB=${DB_NAME:-ggud_db}
-      - TZ=Asia/Seoul
-      - PGDATA=/var/lib/postgresql/data/pgdata
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-ggud_ai}
+      TZ: Asia/Seoul
     volumes:
-      - /opt/ggud/data/postgres-ai:/var/lib/postgresql/data
-      - /opt/ggud/backups/postgres-ai:/backups
-    networks:
-      - ggud-network
-    restart: unless-stopped
+      - ./docker-data/postgres-ai:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_NAME:-ggud_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
-    command:
-      - "postgres"
-      - "-c"
-      - "max_connections=200"
-      - "-c"
-      - "shared_buffers=256MB"
-      - "-c"
-      - "effective_cache_size=1GB"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.3'
-        reservations:
-          memory: 64M
-          cpus: '0.05'
-
-networks:
-  ggud-network:
-    external: true
+      start_period: 20s

@@ -22,6 +22,9 @@ places.jsonl
 reviews.jsonl
 places_backup_*.jsonl
 
+# Crawl checkpoint
+scripts/.crawl_progress.json
+
 # Logs
 *.log
 logs/
@@ -38,5 +41,3 @@ docker-data/
 .DS_Store
 Thumbs.db
 
-# Docker
-docker-compose.override.yml

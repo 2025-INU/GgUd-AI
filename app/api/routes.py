@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.endpoints import places, recommendations, crawler, spring_integration
+from app.api.endpoints import places, recommendations
 
 router = APIRouter()
 
@@ -14,7 +14,6 @@ async def health_check() -> dict[str, str]:
 
 
 router.include_router(places.router)
-router.include_router(crawler.router)
 router.include_router(recommendations.router)
 
-# spring_integration은 main.py에서 루트 경로로 직접 등록됨
+# spring_integration 은 main.py 에서 루트 경로로 직접 등록됨

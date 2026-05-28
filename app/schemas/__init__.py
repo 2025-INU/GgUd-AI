@@ -6,11 +6,5 @@ from app.schemas.recommendation import (  # noqa: F401
     RecommendationRequest,
     RecommendationResponse,
 )
-from app.schemas.crawl import (  # noqa: F401
-    PlaceCrawlRequest,
-    PlaceCrawlSummary,
-    ReviewCrawlRequest,
-    ReviewCrawlSummary,
-)
 
 

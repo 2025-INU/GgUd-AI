@@ -1,7 +1,6 @@
 """Place model."""
 
 from sqlalchemy import BigInteger, Column, DateTime, Float, Integer, String, Text
-from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 
@@ -15,14 +14,12 @@ class Place(Base):
     name = Column(String(255), nullable=False)
     category = Column(String(100), nullable=False)
     road_address = Column(Text, nullable=False)
-    image_url = Column(Text)  # 대표 이미지 URL (nullable)
-    ai_summary = Column(Text)  # 네이버 지도 AI 요약 문구 (nullable)
+    image_url = Column(Text)
+    ai_summary = Column(Text)
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
-    review_count = Column(Integer, default=0)  # 리뷰 개수
-    crawled_at = Column(DateTime, nullable=False)  # 크롤링 시점
-    updated_at = Column(DateTime)  # 마지막 업데이트 시점
-
-    reviews = relationship("Review", back_populates="place", cascade="all, delete-orphan")
+    review_count = Column(Integer, default=0)
+    crawled_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime)
 
 

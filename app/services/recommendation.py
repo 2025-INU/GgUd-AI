@@ -9,8 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.place import Place
-from app.models.review import Review
-from app.models.review_embedding import PlaceEmbedding
 from app.models.place_summary_embedding import PlaceSummaryEmbedding
 from app.schemas.review import CategoryInfo
 from app.schemas.place import PlaceOut
@@ -18,7 +16,6 @@ from app.services.llm import llm_service
 
 
 CATEGORY_KEYS = ("companion", "menu", "mood", "purpose")
-SUMMARY_REVIEW_LIMIT = 100
 
 # 카테고리별 가중치 (고정값)
 CATEGORY_WEIGHTS = {
@@ -122,82 +119,6 @@ def upsert_place(db: Session, data: dict) -> Place:
     except Exception:
         db.rollback()
         raise
-
-
-def refresh_embeddings(db: Session, place_id: int, review_id: int, content: str) -> tuple[CategoryInfo, int]:
-    """Extract categories from review text and store embeddings (리뷰별 각각 저장)."""
-    import sys
-    
-    def split_values(value: str | None) -> list[str]:
-        if not value:
-            return []
-        # 동일 리뷰 내 중복 토큰(예: "친구, 친구, 친구")은 한 번만 처리
-        values = [v.strip() for v in str(value).split(",") if v.strip()]
-        return list(dict.fromkeys(values))
-    
-    categories = llm_service.extract_categories(content)
-    inserted = 0
-    
-    for key in CATEGORY_KEYS:
-        value = getattr(categories, key)
-        if not value:
-            continue
-        values = split_values(value)
-        for single_value in values:
-            exists = (
-                db.query(PlaceEmbedding)
-                .filter(
-                    PlaceEmbedding.place_id == place_id,
-                    PlaceEmbedding.review_id == review_id,
-                    PlaceEmbedding.category == key,
-                    PlaceEmbedding.value_text == single_value,
-                )
-                .first()
-            )
-            if exists:
-                continue
-            embedding = llm_service.embed_text(single_value)
-            embedding_row = PlaceEmbedding(
-                place_id=place_id,
-                review_id=review_id,
-                category=key,
-                value_text=single_value,
-                embedding=embedding,
-            )
-            db.add(embedding_row)
-            inserted += 1
-            print(f"[DEBUG] place_id={place_id}, review_id={review_id}, {key}=\"{single_value}\" → 임베딩 생성", file=sys.stderr)
-    db.commit()
-    return categories, inserted
-
-
-def refresh_place_summary_embeddings(db: Session, place_id: int) -> tuple[str, CategoryInfo, int]:
-    """장소의 최신 리뷰 최대 100개를 1개 요약문으로 만들고 카테고리 임베딩을 재생성."""
-    place = db.get(Place, place_id)
-    if not place:
-        return "", CategoryInfo(), 0
-
-    try:
-        reviews = (
-            db.query(Review.content)
-            .filter(Review.place_id == place_id)
-            .order_by(Review.created_at.desc().nullslast(), Review.id.desc())
-            .limit(SUMMARY_REVIEW_LIMIT)
-            .all()
-        )
-    except Exception:
-        # 신규 파이프라인에서 reviews 테이블이 없을 수 있음.
-        return "", CategoryInfo(), 0
-    review_texts = [r[0] for r in reviews if r and r[0] and r[0].strip()]
-    if not review_texts:
-        return "", CategoryInfo(), 0
-
-    return refresh_place_summary_embeddings_from_review_texts(
-        db=db,
-        place_id=place_id,
-        review_texts=review_texts,
-        place_name=place.name,
-    )
 
 
 def refresh_place_summary_embeddings_from_review_texts(

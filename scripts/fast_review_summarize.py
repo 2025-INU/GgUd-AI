@@ -306,6 +306,8 @@ def load_targets(
         q = db.query(Place.id, Place.name, Place.review_count)
         if min_reviews > 0:
             q = q.filter(Place.review_count >= min_reviews)
+        # 7자리 이하 id 는 네이버에서 상세페이지가 deprecated 되어 리뷰 못 가져옴 → 큐에서 제외
+        q = q.filter(Place.id >= 10_000_000)
         rows = q.order_by(Place.review_count.desc().nulls_last()).all()
         if skip_done:
             done = {
